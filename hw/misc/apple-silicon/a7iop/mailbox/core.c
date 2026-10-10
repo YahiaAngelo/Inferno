@@ -195,6 +195,18 @@ void apple_a7iop_mailbox_update_irq_status(AppleA7IOPMailbox *s)
     s->ap_empty = ap_empty_unmasked && ap_empty;
 }
 
+// Coprocessors that run real firmware on their own CPU (the SEP and the GPU's
+// gfx-asc) take their mailbox interrupts through that CPU's IRQ line.
+static bool apple_a7iop_mailbox_is_fw_iop(const AppleA7IOPMailbox *s)
+{
+    return !strcmp(s->role, "SEP-iop") || !strcmp(s->role, "GFX-iop");
+}
+
+static bool apple_a7iop_mailbox_is_fw_ap(const AppleA7IOPMailbox *s)
+{
+    return !strcmp(s->role, "SEP-ap") || !strcmp(s->role, "GFX-ap");
+}
+
 void apple_a7iop_mailbox_update_irq(AppleA7IOPMailbox *s)
 {
     apple_a7iop_mailbox_update_irq_status(s);
@@ -202,11 +214,11 @@ void apple_a7iop_mailbox_update_irq(AppleA7IOPMailbox *s)
     bool sep_cpu_irq_raised =
         s->iop_nonempty || s->iop_empty || s->ap_nonempty || s->ap_empty;
     sep_cpu_irq_raised |= !apple_mbox_interrupt_status_empty(s);
-    if (!strcmp(s->role, "SEP-iop")) {
+    if (apple_a7iop_mailbox_is_fw_iop(s)) {
         qemu_set_irq(s->sep_cpu_irq, sep_cpu_irq_raised);
     }
     smp_mb();
-    if (!strcmp(s->role, "SEP-ap")) {
+    if (apple_a7iop_mailbox_is_fw_ap(s)) {
         apple_a7iop_mailbox_update_irq(s->iop_mailbox);
     }
 }
@@ -583,9 +595,8 @@ AppleA7IOPMailbox *apple_a7iop_mailbox_new(const char *role,
 
     sysbus_init_mmio(sbd, &s->mmio);
 
-    // Coprocessors that run real firmware on their own CPU feed that CPU's
-    // timers back into this controller.
-    if (!strcmp(s->role, "SEP-iop") || !strcmp(s->role, "GFX-iop")) {
+    // Their CPU's timers feed back into this controller.
+    if (apple_a7iop_mailbox_is_fw_iop(s)) {
         qdev_init_gpio_in_named(DEVICE(s), apple_a7iop_gpio_timer0,
                                 APPLE_A7IOP_SEP_GPIO_TIMER0, 1);
         qdev_init_gpio_in_named(DEVICE(s), apple_a7iop_gpio_timer1,

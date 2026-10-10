@@ -70,6 +70,8 @@ struct AppleGFXASCFWState {
     gsize fw_size;
     hwaddr load_addr;
     hwaddr wrapper_base;
+    hwaddr page_table_base;
+    hwaddr page_table_size;
     hwaddr gptbat_base;
     hwaddr ppl_shared_base;
 };
@@ -83,12 +85,17 @@ struct AppleGFXASCFWState {
  * TTBR at PTPB and builds tables there on a cold boot) and GptS. The rest
  * are read later.
  *
+ * The page tables must live in the region the guest knows as
+ * gfx-shared-region-base: the guest's GPU address translator maps the first
+ * page of that region as the TTBR1 L1 table and adds its own half of the GPU
+ * address space (0xffffffa0...) to it. With a private L1 table the firmware
+ * takes a level 1 translation fault on the first buffer the guest hands it.
+ *
  * FIXME: which entries iBoot really patches, and with what, is inferred from
- * the names and from how the start code uses them. Entries not listed here
- * keep the values in the file.
+ * the names and from how the firmware and the guest use them. PplB being the
+ * handoff page is a guess from the guest's "microPPL magic value found in
+ * the handoff region" check. Entries not listed here keep the file's values.
  */
-#define GFX_FW_PAGE_TABLE_OFFSET (2 * MiB)
-#define GFX_FW_PAGE_TABLE_SIZE (1 * MiB)
 #define GFX_FW_TIMER_FREQUENCY (24000000)
 
 static bool apple_gfx_asc_fw_patch(uint8_t *image, size_t size,
@@ -125,7 +132,6 @@ static bool apple_gfx_asc_fw_patch(uint8_t *image, size_t size,
 static void apple_gfx_asc_fw_patch_all(AppleGFXASCFWState *s, uint8_t *image,
                                        hwaddr base, uint64_t first_vm)
 {
-    hwaddr pt_base = base + GFX_FW_PAGE_TABLE_OFFSET;
     const struct {
         const char *tag;
         uint32_t len;
@@ -133,9 +139,8 @@ static void apple_gfx_asc_fw_patch_all(AppleGFXASCFWState *s, uint8_t *image,
     } patches[] = {
         { "dApC", 8, base }, // CPU physical address
         { "dArW", 8, s->wrapper_base }, // CPU wrapper physical address
-        { "BPTP", 8, pt_base }, // page table base
-        { "SPTP", 8, GFX_FW_PAGE_TABLE_SIZE }, // page table size
-        { "BVTP", 8, first_vm + GFX_FW_PAGE_TABLE_OFFSET }, // ...virtual base
+        { "BPTP", 8, s->page_table_base }, // page table base
+        { "SPTP", 8, s->page_table_size }, // page table size
         { "BtpG", 8, s->gptbat_base }, // UAT GPTBAT base
         { "BlpP", 8, s->ppl_shared_base }, // UAT PPL shared base
         { "qF8v", 4, GFX_FW_TIMER_FREQUENCY }, // ARMv8 timer frequency
@@ -351,11 +356,15 @@ static void apple_gfx_asc_fw_register_types(void)
 type_init(apple_gfx_asc_fw_register_types);
 
 void apple_gfx_asc_fw_set_platform(SysBusDevice *sbd, hwaddr wrapper_base,
-                                   hwaddr gptbat_base, hwaddr ppl_shared_base)
+                                   hwaddr page_table_base,
+                                   hwaddr page_table_size, hwaddr gptbat_base,
+                                   hwaddr ppl_shared_base)
 {
     AppleGFXASCFWState *s = APPLE_GFX_ASC_FW(sbd);
 
     s->wrapper_base = wrapper_base;
+    s->page_table_base = page_table_base;
+    s->page_table_size = page_table_size;
     s->gptbat_base = gptbat_base;
     s->ppl_shared_base = ppl_shared_base;
 }

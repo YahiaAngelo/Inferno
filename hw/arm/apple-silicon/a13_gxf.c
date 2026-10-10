@@ -626,10 +626,10 @@ static const ARMCPRegInfo apple_a13_gxf_cp_reginfo[] = {
     {
         // Written by the GPU coprocessor firmware (armfw_g12p) during SPRR
         // setup, right after the EL0/EL1 BR1 permission tables, with two
-        // identical 32-bit halves (0x0000f6d80000f6d8). It sits one past the
-        // MPRR mask registers and looks like both masks packed into one
-        // register on that core. The name and meaning are inferred; it is
-        // stored and otherwise ignored.
+        // identical 32-bit halves (0x0000f6d80000f6d8). It is the permission
+        // table for page-table entries with descriptor bit 55 set (mappings
+        // created by the OS in the GPU's shared address space); see
+        // get_phys_addr_lpae(). The name is made up and the meaning inferred.
         .name = "MPRR_S3_6_C15_C3_5",
         .cp = CP_REG_ARM64_SYSREG_CP,
         .state = ARM_CP_STATE_AA64,

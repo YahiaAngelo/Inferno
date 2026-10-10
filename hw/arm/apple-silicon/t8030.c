@@ -748,8 +748,8 @@ static void t8030_memory_setup(AppleT8030MachineState *t8030)
             assert_nonnull(asc_dev);
             apple_gfx_asc_fw_set_platform(
                 SYS_BUS_DEVICE(asc_dev),
-                t8030->armio_base + ((uint64_t *)asc_reg->data)[0], ttbat,
-                shared);
+                t8030->armio_base + ((uint64_t *)asc_reg->data)[0], shared,
+                GFX_SHARED_REGION_SIZE, ttbat, handoff);
         }
     }
     // adjust framebuffer for verbose display.

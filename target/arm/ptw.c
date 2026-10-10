@@ -2216,7 +2216,27 @@ static bool get_phys_addr_lpae(CPUARMState *env, S1Translate *ptw,
         }
 
         user_rw = simple_ap_to_rw_prot_is_user(ap, true);
-        if (arm_is_sprr_enabled(env)) {
+        if (arm_is_sprr_enabled(env) && extract64(attrs, 55, 1) &&
+            env->sprr.mprr_s3_6_c15_c3_5 != 0) {
+            /*
+             * Apple GPU coprocessor (UAT) page tables: descriptor bit 55 marks
+             * a mapping created by the OS rather than by the firmware, and
+             * those use a second permission table with two bits per
+             * (AP, UXN, PXN) index: bit 1 = read, bit 0 = write, never
+             * executable. The firmware loads it into S3_6_C15_C3_5 as two
+             * identical 32-bit halves (0xf6d8 on G12); the low half is used
+             * here. This matches the Asahi Linux driver's PROT_TO_PERMS_OS
+             * table for M1 in six of its seven non-zero entries. Inferred,
+             * not documented.
+             */
+            int os_idx = ((ap << 2) | (xn << 1) | pxn) & 0xf;
+            int os_perm =
+                extract64(env->sprr.mprr_s3_6_c15_c3_5, os_idx * 2, 2);
+
+            prot_rw = ((os_perm & 2) ? PAGE_READ : 0) |
+                      ((os_perm & 1) ? PAGE_WRITE : 0);
+            xn = pxn = 1;
+        } else if (arm_is_sprr_enabled(env)) {
             prot_rw = pte_to_sprr_prot(env, ap, xn, pxn) & (PAGE_READ | PAGE_WRITE);
             xn = pxn = !(pte_to_sprr_prot(env, ap, xn, pxn) & PAGE_EXEC);
         } else {

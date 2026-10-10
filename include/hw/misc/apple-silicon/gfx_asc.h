@@ -36,6 +36,8 @@ SysBusDevice *apple_gfx_asc_fw_create(AppleDTNode *node,
                                       uint32_t cpu_id, const char *fw_filename);
 // Addresses the bootloader patches into the firmware before starting it.
 void apple_gfx_asc_fw_set_platform(SysBusDevice *sbd, hwaddr wrapper_base,
-                                   hwaddr gptbat_base, hwaddr ppl_shared_base);
+                                   hwaddr page_table_base,
+                                   hwaddr page_table_size, hwaddr gptbat_base,
+                                   hwaddr ppl_shared_base);
 
 #endif /* HW_MISC_APPLE_SILICON_GFX_ASC_H */
