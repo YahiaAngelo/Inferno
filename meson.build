@@ -1762,7 +1762,28 @@ if not gnutls_crypto.found()
       xts = 'private'
     endif
     crypto_sm4 = nettle
+    # SM4 ALG is available in nettle >= 3.9, but some distributions strip it
+    if nettle.found() and not cc.links('''
+      #include <nettle/sm4.h>
+      int main(void) {
+        struct sm4_ctx ctx;
+        unsigned char key[16] = {0};
+        sm4_set_encrypt_key(&ctx, key);
+        return 0;
+      }''', dependencies: nettle)
+      crypto_sm4 = not_found
+    endif
     crypto_sm3 = nettle
+    # SM3 ALG is available in nettle >= 3.8, but some distributions strip it
+    if nettle.found() and not cc.links('''
+      #include <nettle/sm3.h>
+      int main(void) {
+        struct sm3_ctx ctx;
+        sm3_init(&ctx);
+        return 0;
+      }''', dependencies: nettle)
+      crypto_sm3 = not_found
+    endif
   endif
 endif
 
