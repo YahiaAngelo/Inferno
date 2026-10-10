@@ -2070,6 +2070,62 @@ static void t8030_create_accbuck(AppleT8030MachineState *t8030)
     i2c_slave_create_simple(i2c->bus, TYPE_FAN53740, *(uint8_t *)prop->data);
 }
 
+// GPU identification block, at sgx + 0xd04000. The guest's AGX driver reads
+// these in readChipInfo() and declines the device unless the upper half of the
+// version register is 0x0300 (G12) and the revision is A0 (0x00) or B0 (0x10).
+#define SGX_ID_BASE (0xD04000)
+#define SGX_ID_SIZE (0x20)
+#define SGX_ID_VERSION (0x00)
+#define SGX_ID_UNK08 (0x08)
+#define SGX_ID_COUNTS_1 (0x10)
+#define SGX_ID_COUNTS_2 (0x14)
+#define SGX_ID_UNK18 (0x18)
+#define SGX_ID_CLUSTERS (0x1C)
+#define SGX_ID_VERSION_G12P_B0 (0x03001000)
+
+static uint64_t t8030_sgx_id_read(void *opaque, hwaddr addr, unsigned size)
+{
+    AppleT8030MachineState *t8030 = opaque;
+    uint32_t value;
+
+    switch (addr) {
+    case SGX_ID_VERSION:
+        value = t8030->gfx_id_version;
+        break;
+    case SGX_ID_COUNTS_1:
+        // Low byte: cores per cluster. FIXME: the rest is a guess.
+        value = 4;
+        break;
+    case SGX_ID_CLUSTERS:
+        // Bits 12..19: number of clusters. FIXME: the rest is a guess.
+        value = 1 << 12;
+        break;
+    default:
+        value = 0;
+        break;
+    }
+    qemu_log_mask(LOG_UNIMP, "sgx.id: read  (size %u, offset 0x%02" HWADDR_PRIx
+                             ") -> 0x%08x\n",
+                  size, addr, value);
+    return value;
+}
+
+static void t8030_sgx_id_write(void *opaque, hwaddr addr, uint64_t data,
+                               unsigned size)
+{
+    qemu_log_mask(LOG_UNIMP, "sgx.id: write (size %u, offset 0x%02" HWADDR_PRIx
+                             ", value 0x%" PRIx64 ")\n",
+                  size, addr, data);
+}
+
+static const MemoryRegionOps t8030_sgx_id_ops = {
+    .read = t8030_sgx_id_read,
+    .write = t8030_sgx_id_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+};
+
 // Experimental: expose the GPU and its coprocessor as logging stubs so that
 // the guest's accesses can be traced with `-d unimp`.
 static void t8030_create_gfx_stubs(AppleT8030MachineState *t8030)
@@ -2096,6 +2152,16 @@ static void t8030_create_gfx_stubs(AppleT8030MachineState *t8030)
             create_unimplemented_device(name, t8030->armio_base + reg[j * 2],
                                         reg[j * 2 + 1]);
             g_free(name);
+        }
+        if (i == 0) {
+            // The stubs sit at priority -1000, so this overlays them.
+            memory_region_init_io(&t8030->gfx_id, OBJECT(t8030),
+                                  &t8030_sgx_id_ops, t8030, "sgx.id",
+                                  SGX_ID_SIZE);
+            memory_region_add_subregion(get_system_memory(),
+                                        t8030->armio_base + reg[0] +
+                                            SGX_ID_BASE,
+                                        &t8030->gfx_id);
         }
     }
 }
@@ -3093,6 +3159,7 @@ static char *t8030_get_boot_mode(Object *obj, Error **errp)
 PROP_VISIT_GETTER_SETTER(uint64, ecid);
 PROP_GETTER_SETTER(bool, kaslr_off);
 PROP_GETTER_SETTER(bool, gfx);
+PROP_VISIT_GETTER_SETTER(uint32, gfx_id_version);
 PROP_GETTER_SETTER(bool, force_dfu);
 PROP_GETTER_SETTER(int, usb_conn_type);
 PROP_STR_GETTER_SETTER(trustcache_filename);
@@ -3163,6 +3230,13 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
         klass, "gfx",
         "Expose the GPU (sgx) and its coprocessor (gfx-asc) to the guest. "
         "Experimental: both are register-logging stubs (-d unimp)");
+    oprop = object_class_property_add(klass, "gfx-id-version", "uint32",
+                                      t8030_get_gfx_id_version,
+                                      t8030_set_gfx_id_version, NULL, NULL);
+    object_property_set_default_uint(oprop, SGX_ID_VERSION_G12P_B0);
+    object_class_property_set_description(
+        klass, "gfx-id-version",
+        "GPU ID version register (0x03000000 = G12P A0, 0x03001000 = B0)");
     object_class_property_add_bool(klass, "force-dfu", t8030_get_force_dfu,
                                    t8030_set_force_dfu);
     object_class_property_set_description(klass, "force-dfu", "Force DFU");
