@@ -2274,8 +2274,62 @@ static void t8030_create_gfx_asc(AppleT8030MachineState *t8030)
     sysbus_realize_and_unref(sbd, &error_fatal);
 }
 
-// Experimental: expose the GPU as a logging stub so that the guest's accesses
-// can be traced with `-d unimp`.
+// GPU register file: writes are stored and read back, and every access is
+// logged with `-d unimp`. Enough for state registers the firmware polls (the
+// power state at +0xd01000 reads back the requested state); registers with
+// real behaviour get overlays on top.
+typedef struct {
+    AppleT8030MachineState *t8030;
+    unsigned idx;
+    hwaddr base; // offset of this range from the first one
+} T8030GfxRegFile;
+
+// Power state: the firmware writes (state | BUSY) and polls until the low
+// five bits equal the state, i.e. until the hardware clears BUSY. The
+// transition is instant here.
+#define SGX_BLOCK_SIZE (16 * MiB)
+#define SGX_PWR_STATE (0xD01000)
+#define SGX_PWR_STATE_BUSY BIT(4)
+
+static uint64_t t8030_sgx_regs_read(void *opaque, hwaddr addr, unsigned size)
+{
+    T8030GfxRegFile *rf = opaque;
+    uint8_t *p = (uint8_t *)rf->t8030->gfx_reg_data[rf->idx] + addr;
+    uint64_t v = ldn_le_p(p, size);
+
+    qemu_log_mask(LOG_UNIMP,
+                  "sgx.regs[%u]: read  (size %u, offset 0x%06" HWADDR_PRIx
+                  ") = 0x%" PRIx64 "\n",
+                  rf->idx, size, addr, v);
+    return v;
+}
+
+static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
+                                 unsigned size)
+{
+    T8030GfxRegFile *rf = opaque;
+    uint8_t *p = (uint8_t *)rf->t8030->gfx_reg_data[rf->idx] + addr;
+
+    qemu_log_mask(LOG_UNIMP,
+                  "sgx.regs[%u]: write (size %u, offset 0x%06" HWADDR_PRIx
+                  ") = 0x%" PRIx64 "\n",
+                  rf->idx, size, addr, data);
+    if (rf->base + addr == SGX_PWR_STATE) {
+        data &= ~(uint64_t)SGX_PWR_STATE_BUSY;
+    }
+    stn_le_p(p, size, data);
+}
+
+static const MemoryRegionOps t8030_sgx_regs_ops = {
+    .read = t8030_sgx_regs_read,
+    .write = t8030_sgx_regs_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 8,
+    .impl.min_access_size = 1,
+    .impl.max_access_size = 8,
+};
+
 static void t8030_create_gfx_stubs(AppleT8030MachineState *t8030)
 {
     static const char *const nodes[] = { "sgx" };
@@ -2295,10 +2349,25 @@ static void t8030_create_gfx_stubs(AppleT8030MachineState *t8030)
         prop = apple_dt_get_prop(child, "reg");
         assert_nonnull(prop);
         reg = (uint64_t *)prop->data;
-        for (j = 0; j < prop->len / (sizeof(uint64_t) * 2); j++) {
-            name = g_strdup_printf("%s.reg%zu", nodes[i], j);
-            create_unimplemented_device(name, t8030->armio_base + reg[j * 2],
-                                        reg[j * 2 + 1]);
+        // The device tree lists two windows (+0 and +0xd00000), but the
+        // firmware also reaches registers outside them (e.g. +0xd71070), so
+        // back the whole block.
+        {
+            T8030GfxRegFile *rf = g_new0(T8030GfxRegFile, 1);
+
+            j = 0;
+            name = g_strdup_printf("%s.regs", nodes[i]);
+            rf->t8030 = t8030;
+            rf->idx = j;
+            rf->base = 0;
+            t8030->gfx_reg_size[j] = SGX_BLOCK_SIZE;
+            t8030->gfx_reg_data[j] = g_malloc0(SGX_BLOCK_SIZE + 8);
+            memory_region_init_io(&t8030->gfx_regs[j], OBJECT(t8030),
+                                  &t8030_sgx_regs_ops, rf, name,
+                                  SGX_BLOCK_SIZE);
+            memory_region_add_subregion_overlap(get_system_memory(),
+                                                t8030->armio_base + reg[0],
+                                                &t8030->gfx_regs[j], -1000);
             g_free(name);
         }
         if (i == 0) {

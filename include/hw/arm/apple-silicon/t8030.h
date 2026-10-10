@@ -74,6 +74,9 @@ typedef struct {
     bool gfx;
     uint32_t gfx_id_version;
     MemoryRegion gfx_id;
+    MemoryRegion gfx_regs[4];
+    uint32_t *gfx_reg_data[4];
+    uint64_t gfx_reg_size[4];
     bool force_dfu;
     uint32_t board_id;
     uint32_t chip_revision;
