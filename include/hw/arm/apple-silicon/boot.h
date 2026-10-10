@@ -346,6 +346,7 @@ typedef struct {
     gsize ticket_length;
     bool non_cold_boot;
     bool had_autoboot;
+    bool keep_gfx;
     AppleBootMode boot_mode;
 } AppleBootInfo;
 

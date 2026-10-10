@@ -656,6 +656,7 @@ static void t8030_memory_setup(AppleT8030MachineState *t8030)
 
     apple_boot_allocate_segment_records(memory_map, hdr);
 
+    info->keep_gfx = t8030->gfx;
     apple_boot_populate_dt(t8030->device_tree, info, auto_boot);
 
     switch (hdr->file_type) {
@@ -2069,6 +2070,36 @@ static void t8030_create_accbuck(AppleT8030MachineState *t8030)
     i2c_slave_create_simple(i2c->bus, TYPE_FAN53740, *(uint8_t *)prop->data);
 }
 
+// Experimental: expose the GPU and its coprocessor as logging stubs so that
+// the guest's accesses can be traced with `-d unimp`.
+static void t8030_create_gfx_stubs(AppleT8030MachineState *t8030)
+{
+    static const char *const nodes[] = { "sgx", "gfx-asc" };
+    AppleDTNode *armio;
+    AppleDTNode *child;
+    AppleDTProp *prop;
+    uint64_t *reg;
+    char *name;
+    size_t i, j;
+
+    armio = apple_dt_get_node(t8030->device_tree, "arm-io");
+    assert_nonnull(armio);
+
+    for (i = 0; i < ARRAY_SIZE(nodes); i++) {
+        child = apple_dt_get_node(armio, nodes[i]);
+        assert_nonnull(child);
+        prop = apple_dt_get_prop(child, "reg");
+        assert_nonnull(prop);
+        reg = (uint64_t *)prop->data;
+        for (j = 0; j < prop->len / (sizeof(uint64_t) * 2); j++) {
+            name = g_strdup_printf("%s.reg%zu", nodes[i], j);
+            create_unimplemented_device(name, t8030->armio_base + reg[j * 2],
+                                        reg[j * 2 + 1]);
+            g_free(name);
+        }
+    }
+}
+
 static void t8030_create_misc(AppleT8030MachineState *t8030)
 {
     AppleDTNode *armio;
@@ -2995,6 +3026,9 @@ static void t8030_init(MachineState *machine)
     t8030_create_scaler(t8030);
     t8030_create_accbuck(t8030);
     t8030_create_misc(t8030);
+    if (t8030->gfx) {
+        t8030_create_gfx_stubs(t8030);
+    }
 
     t8030_create_tempsensor(t8030, "tempsensor0", false);
     t8030_create_tempsensor(t8030, "tempsensor1", false);
@@ -3058,6 +3092,7 @@ static char *t8030_get_boot_mode(Object *obj, Error **errp)
 
 PROP_VISIT_GETTER_SETTER(uint64, ecid);
 PROP_GETTER_SETTER(bool, kaslr_off);
+PROP_GETTER_SETTER(bool, gfx);
 PROP_GETTER_SETTER(bool, force_dfu);
 PROP_GETTER_SETTER(int, usb_conn_type);
 PROP_STR_GETTER_SETTER(trustcache_filename);
@@ -3123,6 +3158,11 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
     object_class_property_add_bool(klass, "kaslr-off", t8030_get_kaslr_off,
                                    t8030_set_kaslr_off);
     object_class_property_set_description(klass, "kaslr-off", "Disable KASLR");
+    object_class_property_add_bool(klass, "gfx", t8030_get_gfx, t8030_set_gfx);
+    object_class_property_set_description(
+        klass, "gfx",
+        "Expose the GPU (sgx) and its coprocessor (gfx-asc) to the guest. "
+        "Experimental: both are register-logging stubs (-d unimp)");
     object_class_property_add_bool(klass, "force-dfu", t8030_get_force_dfu,
                                    t8030_set_force_dfu);
     object_class_property_set_description(klass, "force-dfu", "Force DFU");

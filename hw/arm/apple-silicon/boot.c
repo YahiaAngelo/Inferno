@@ -196,6 +196,18 @@ static const char *REM_NAMES[] = {
     "Lynx\0$",
 };
 
+// Nodes kept only when the machine asks for the GPU to be exposed.
+static const char *KEEP_COMP_GFX[] = {
+    "gpu,t8030\0$",
+    "iommu-mapper,gfx\0$",
+};
+
+static const char *KEEP_NAMES_GFX[] = {
+    "gfx-asc\0$",
+};
+
+static bool apple_boot_keep_gfx;
+
 static const char *REM_DEV_TYPES[] = {
     "wlan\0$",
     "pmp\0$",
@@ -272,6 +284,15 @@ static void apple_boot_process_dt_node(AppleDTNode *node, AppleDTNode *parent)
                 break;
             }
         }
+        if (!found && apple_boot_keep_gfx) {
+            for (i = 0; i < ARRAY_SIZE(KEEP_COMP_GFX); i++) {
+                if (memcmp(prop->data, KEEP_COMP_GFX[i],
+                           MIN(prop->len, sstrlen(KEEP_COMP_GFX[i]))) == 0) {
+                    found = true;
+                    break;
+                }
+            }
+        }
         if (!found) {
             assert_nonnull(parent);
             DINFO(
@@ -285,7 +306,17 @@ static void apple_boot_process_dt_node(AppleDTNode *node, AppleDTNode *parent)
 
     if ((prop = apple_dt_get_prop(node, "name")) != NULL) {
         assert_nonnull(prop->data);
-        for (i = 0; i < ARRAY_SIZE(REM_NAMES); i++) {
+        found = false;
+        if (apple_boot_keep_gfx) {
+            for (i = 0; i < ARRAY_SIZE(KEEP_NAMES_GFX); i++) {
+                if (memcmp(prop->data, KEEP_NAMES_GFX[i],
+                           MIN(prop->len, sstrlen(KEEP_NAMES_GFX[i]))) == 0) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        for (i = 0; !found && i < ARRAY_SIZE(REM_NAMES); i++) {
             uint64_t size = MIN(prop->len, sstrlen(REM_NAMES[i]));
             if (memcmp(prop->data, REM_NAMES[i], size) == 0) {
                 assert_nonnull(parent);
@@ -608,6 +639,7 @@ void apple_boot_populate_dt(AppleDTNode *root, AppleBootInfo *info,
 
     apple_boot_init_mem_ranges(root);
 
+    apple_boot_keep_gfx = info->keep_gfx;
     apple_boot_process_dt_node(root, NULL);
 
     // Prevent further additions.

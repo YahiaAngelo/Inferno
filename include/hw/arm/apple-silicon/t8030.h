@@ -70,6 +70,7 @@ typedef struct {
     MemoryRegion amcc;
     uint8_t amcc_reg[0x100000];
     bool kaslr_off;
+    bool gfx;
     bool force_dfu;
     uint32_t board_id;
     uint32_t chip_revision;
