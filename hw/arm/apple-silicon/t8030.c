@@ -2291,6 +2291,12 @@ typedef struct {
 #define SGX_PWR_STATE (0xD01000)
 #define SGX_PWR_STATE_BUSY BIT(4)
 
+// Command register written during GPU init and per-context setup as
+// (id << 8) | 1 or 3; the firmware waits for bit 0 to clear. What the
+// command does (it looks like a context/TLB flush) is not known.
+#define SGX_CTX_CMD (0x16870)
+#define SGX_CTX_CMD_BUSY BIT(0)
+
 static uint64_t t8030_sgx_regs_read(void *opaque, hwaddr addr, unsigned size)
 {
     T8030GfxRegFile *rf = opaque;
@@ -2316,6 +2322,8 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
                   rf->idx, size, addr, data);
     if (rf->base + addr == SGX_PWR_STATE) {
         data &= ~(uint64_t)SGX_PWR_STATE_BUSY;
+    } else if (rf->base + addr == SGX_CTX_CMD) {
+        data &= ~(uint64_t)SGX_CTX_CMD_BUSY;
     }
     stn_le_p(p, size, data);
 }
