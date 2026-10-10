@@ -1361,6 +1361,23 @@ nettle = dependency('nettle', version: '>=3.10',
 if not cc.has_header('nettle/xts.h', dependencies: nettle)
   xts = 'private'
 endif
+# Some distributions ship the SM3/SM4 headers but strip the functions from
+# the library, so check that they actually link.
+crypto_sm4 = cc.links('''
+  #include <nettle/sm4.h>
+  int main(void) {
+    struct sm4_ctx ctx;
+    unsigned char key[16] = {0};
+    sm4_set_encrypt_key(&ctx, key);
+    return 0;
+  }''', dependencies: nettle)
+crypto_sm3 = cc.links('''
+  #include <nettle/sm3.h>
+  int main(void) {
+    struct sm3_ctx ctx;
+    sm3_init(&ctx);
+    return 0;
+  }''', dependencies: nettle)
 
 gmp = dependency('gmp', required: false, method: 'pkg-config')
 if nettle.found() and gmp.found()
@@ -1756,6 +1773,8 @@ config_host_data.set('CONFIG_GETTID', has_gettid)
 config_host_data.set('CONFIG_GNUTLS', gnutls.found())
 config_host_data.set('CONFIG_TASN1', tasn1.found())
 config_host_data.set('CONFIG_HOGWEED', hogweed.found())
+config_host_data.set('CONFIG_CRYPTO_SM4', crypto_sm4)
+config_host_data.set('CONFIG_CRYPTO_SM3', crypto_sm3)
 config_host_data.set('CONFIG_QEMU_PRIVATE_XTS', xts == 'private')
 config_host_data.set('CONFIG_MALLOC_TRIM', has_malloc_trim)
 config_host_data.set('CONFIG_ZSTD', zstd.found())
