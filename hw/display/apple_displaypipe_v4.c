@@ -177,6 +177,16 @@ struct AppleDisplayPipeV4State {
     QemuConsole *console;
     QEMUBH *update_disp_image_bh;
     QEMUTimer *boot_splash_timer;
+    // Read-only statistics, exposed as QOM properties.
+    uint64_t stat_frames;
+    uint64_t stat_refreshes;
+    uint64_t stat_dirty_scans;
+    uint64_t stat_vblanks;
+    // Panel refresh rate driving the output-ready interrupt; 0 ties it to the
+    // host UI refresh instead (historical behaviour).
+    uint32_t vblank_hz;
+    QEMUTimer *vblank_timer;
+    int64_t last_scan_ns;
 };
 
 static const VMStateDescription vmstate_adp_v4 = {
@@ -643,12 +653,37 @@ static void adp_v4_invalidate(void *opaque)
 {
 }
 
-static void adp_v4_gfx_update(void *opaque)
+static bool adp_v4_gp_active(const ADPV4GenPipe *genpipe)
+{
+    uint32_t config_control = genpipe->state.config_control;
+
+    return REG_FIELD_EX32(config_control, GP_CONFIG_CONTROL, RUN) != 0 &&
+           REG_FIELD_EX32(config_control, GP_CONFIG_CONTROL, ENABLED) != 0;
+}
+
+static void adp_v4_output_ready(AppleDisplayPipeV4State *adp)
+{
+    qatomic_or(&adp->int_status, R_CONTROL_INT_OUTPUT_READY_MASK);
+    adp_v4_update_irqs(adp);
+}
+
+static void adp_v4_vblank_timer(void *opaque)
 {
     AppleDisplayPipeV4State *adp = opaque;
+
+    qatomic_inc(&adp->stat_vblanks);
+    adp_v4_output_ready(adp);
+    timer_mod(adp->vblank_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                                     NANOSECONDS_PER_SECOND / adp->vblank_hz);
+}
+
+static void adp_v4_scan_framebuffer(AppleDisplayPipeV4State *adp)
+{
     DirtyBitmapSnapshot *snap;
     bool dirty;
     uint32_t y, ys;
+
+    qatomic_inc(&adp->stat_dirty_scans);
 
     snap = memory_region_snapshot_and_clear_dirty(
         adp->vram_mr, adp->vram_off + adp->fb_off,
@@ -671,9 +706,41 @@ static void adp_v4_gfx_update(void *opaque)
         dpy_gfx_update(adp->console, 0, ys, adp->width, y - ys);
     }
     g_free(snap);
+}
 
-    qatomic_or(&adp->int_status, R_CONTROL_INT_OUTPUT_READY_MASK);
-    adp_v4_update_irqs(adp);
+static void adp_v4_gfx_update(void *opaque)
+{
+    AppleDisplayPipeV4State *adp = opaque;
+    int64_t now;
+
+    qatomic_inc(&adp->stat_refreshes);
+
+    // vblank-hz=0 keeps the historical behaviour: the host UI refresh both
+    // scans the framebuffer and drives the guest's output-ready interrupt.
+    if (adp->vblank_hz == 0) {
+        adp_v4_scan_framebuffer(adp);
+        adp_v4_output_ready(adp);
+        return;
+    }
+
+    // Once the guest presents through a generic pipe, every frame reaches the
+    // console via adp_v4_gp_draw(), which reports its own update rectangle.
+    // The dirty scan is only needed for direct framebuffer writes (boot
+    // console). Skipping it matters under TCG: snapshot-and-clear makes every
+    // vCPU walk its whole TLB on each call, dirty or not.
+    if (adp_v4_gp_active(&adp->genpipe[0]) ||
+        adp_v4_gp_active(&adp->genpipe[1])) {
+        return;
+    }
+
+    // The host refresh rate follows the host monitor and can be far above the
+    // panel's; do not scan more often than the panel refreshes.
+    now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (now - adp->last_scan_ns < NANOSECONDS_PER_SECOND / adp->vblank_hz) {
+        return;
+    }
+    adp->last_scan_ns = now;
+    adp_v4_scan_framebuffer(adp);
 }
 
 static const GraphicHwOps adp_v4_ops = {
@@ -847,6 +914,12 @@ static void adp_v4_reset_hold(Object *obj, ResetType type)
     adp_v4_blend_reset(&adp->blend_unit);
 
     adp_v4_read_and_draw_boot_splash(adp);
+
+    if (adp->vblank_timer != NULL) {
+        timer_mod(adp->vblank_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                      NANOSECONDS_PER_SECOND / adp->vblank_hz);
+    }
 }
 
 static void adp_v4_realize(DeviceState *dev, Error **errp)
@@ -854,11 +927,26 @@ static void adp_v4_realize(DeviceState *dev, Error **errp)
     AppleDisplayPipeV4State *adp = APPLE_DISPLAY_PIPE_V4(dev);
 
     adp->console = graphic_console_init(dev, 0, &adp_v4_ops, adp);
+
+    object_property_add_uint64_ptr(OBJECT(dev), "stat-frames",
+                                   &adp->stat_frames, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(OBJECT(dev), "stat-refreshes",
+                                   &adp->stat_refreshes, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(OBJECT(dev), "stat-dirty-scans",
+                                   &adp->stat_dirty_scans, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(OBJECT(dev), "stat-vblanks",
+                                   &adp->stat_vblanks, OBJ_PROP_FLAG_READ);
+
+    if (adp->vblank_hz != 0) {
+        adp->vblank_timer =
+            timer_new_ns(QEMU_CLOCK_VIRTUAL, adp_v4_vblank_timer, adp);
+    }
 }
 
 static const Property adp_v4_props[] = {
     DEFINE_PROP_UINT32("width", AppleDisplayPipeV4State, width, 0),
     DEFINE_PROP_UINT32("height", AppleDisplayPipeV4State, height, 0),
+    DEFINE_PROP_UINT32("vblank-hz", AppleDisplayPipeV4State, vblank_hz, 60),
 };
 
 static void adp_v4_class_init(ObjectClass *klass, const void *data)
@@ -934,6 +1022,7 @@ static void adp_v4_update_disp_bh(void *opaque)
 
     adp_v4_gp_draw(&adp->genpipe[0], &adp->dma_as, disp_image, adp->console);
     adp_v4_gp_draw(&adp->genpipe[1], &adp->dma_as, disp_image, adp->console);
+    qatomic_inc(&adp->stat_frames);
 
     qatomic_or(&adp->int_status, R_CONTROL_INT_FRAME_PROCESSED_MASK);
     adp_v4_update_irqs(adp);
