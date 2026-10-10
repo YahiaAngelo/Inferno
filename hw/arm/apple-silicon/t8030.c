@@ -144,6 +144,65 @@
 #define SIO_SIZE (0x114000)
 #define PANIC_SIZE (0x100000)
 
+// Regions iBoot hands to the GPU's address translator (IOUAT), which reads
+// them from the sgx node in IOUnifiedAddressTranslator::mapHardwareResources()
+// and maps one 16K page of each:
+//   gfx-shared-region-base  u64 physical address, the TTBR1 L1 table
+//   ttbat-phys-addr-base    u32 physical *page number* (address >> 14)
+//   gfx-handoff-base        u64 physical address, the handoff page
+// FIXME: only the first page of each is known to be used; the shared region
+// is oversized in case the rest of it is.
+#define GFX_SHARED_REGION_SIZE (16 * MiB)
+#define GFX_TTBAT_SIZE (0x4000)
+#define GFX_HANDOFF_SIZE (0x4000)
+#define GFX_PAGE_SHIFT (14)
+
+// Layout of a `/defaults/pmap-io-ranges` entry (XNU's pmap_io_range_t).
+typedef struct {
+    uint64_t addr;
+    uint64_t len;
+    uint32_t wimg;
+    uint32_t signature;
+} QEMU_PACKED T8030PmapIORange;
+
+#define PMAP_IO_RANGE_CARVEOUT (1U << 30)
+#define PMAP_PP_ATTR_MONITOR (0x4000)
+#define PMAP_VM_WIMG_IO (0x7)
+
+// The PPL refuses IOMMU pages it does not own ("iommu register address ... is
+// not PPL-protected"). iBoot describes its carveouts in pmap-io-ranges; do the
+// same for the pages handed to the GPU's address translator.
+static void t8030_gfx_add_pmap_io_range(AppleT8030MachineState *t8030,
+                                        hwaddr addr, hwaddr len,
+                                        const char *what)
+{
+    AppleDTNode *defaults;
+    AppleDTProp *prop;
+    T8030PmapIORange *ranges;
+    size_t count;
+
+    defaults = apple_dt_get_node(t8030->device_tree, "defaults");
+    assert_nonnull(defaults);
+    prop = apple_dt_get_prop(defaults, "pmap-io-ranges");
+    assert_nonnull(prop);
+
+    count = prop->len / sizeof(*ranges);
+    ranges = g_malloc0((count + 1) * sizeof(*ranges));
+    memcpy(ranges, prop->data, count * sizeof(*ranges));
+    ranges[count].addr = addr;
+    ranges[count].len = len;
+    ranges[count].wimg =
+        PMAP_IO_RANGE_CARVEOUT | PMAP_PP_ATTR_MONITOR | PMAP_VM_WIMG_IO;
+    // The PPL checks this: "signature mismatch: expected 0x47554154".
+    ranges[count].signature = 0x47554154; // 'GUAT'
+    apple_dt_set_prop(defaults, "pmap-io-ranges",
+                      (count + 1) * sizeof(*ranges), ranges);
+    g_free(ranges);
+
+    info_report("gfx: %s at 0x%" HWADDR_PRIx " (0x%" HWADDR_PRIx " bytes)",
+                what, addr, len);
+}
+
 #define AMCC_BASE (0x200000000)
 #define AMCC_SIZE (0x100000)
 #define AMCC_PLANE_COUNT (4)
@@ -646,6 +705,24 @@ static void t8030_memory_setup(AppleT8030MachineState *t8030)
         vram_reg[0] = t8030->video_args.base_addr;
         vram_reg[1] = DISPLAY_SIZE;
         apple_dt_set_prop(vram, "reg", sizeof(vram_reg), &vram_reg);
+    }
+    if (t8030->gfx) {
+        AppleDTNode *sgx = apple_dt_get_node(t8030->device_tree, "arm-io/sgx");
+        assert_nonnull(sgx);
+        hwaddr shared = carveout_alloc_mem(ca, GFX_SHARED_REGION_SIZE);
+        hwaddr ttbat = carveout_alloc_mem(ca, GFX_TTBAT_SIZE);
+        hwaddr handoff = carveout_alloc_mem(ca, GFX_HANDOFF_SIZE);
+
+        apple_dt_set_prop_u64(sgx, "gfx-shared-region-base", shared);
+        apple_dt_set_prop_u32(sgx, "ttbat-phys-addr-base",
+                              ttbat >> GFX_PAGE_SHIFT);
+        apple_dt_set_prop_u64(sgx, "gfx-handoff-base", handoff);
+
+        t8030_gfx_add_pmap_io_range(t8030, shared, GFX_TTBAT_SIZE,
+                                    "TTBR1 L1 table");
+        t8030_gfx_add_pmap_io_range(t8030, ttbat, GFX_TTBAT_SIZE, "TTBAT");
+        t8030_gfx_add_pmap_io_range(t8030, handoff, GFX_HANDOFF_SIZE,
+                                    "handoff page");
     }
     // adjust framebuffer for verbose display.
     t8030->video_args.base_addr += adp_v4_get_fb_off(APPLE_DISPLAY_PIPE_V4(
@@ -2093,8 +2170,11 @@ static uint64_t t8030_sgx_id_read(void *opaque, hwaddr addr, unsigned size)
         value = t8030->gfx_id_version;
         break;
     case SGX_ID_COUNTS_1:
-        // Low byte: cores per cluster. FIXME: the rest is a guess.
-        value = 4;
+        // Bits 0..7: cores per cluster. Bits 8..15 and 16..23 are two more
+        // counts; getProbeScore() declines the device if bits 8..15 are zero.
+        // Asahi multiplies the two for the cluster count on G14X.
+        // FIXME: 1 x 1 clusters of 4 cores is a guess for G12P.
+        value = 0x00010104;
         break;
     case SGX_ID_CLUSTERS:
         // Bits 12..19: number of clusters. FIXME: the rest is a guess.
