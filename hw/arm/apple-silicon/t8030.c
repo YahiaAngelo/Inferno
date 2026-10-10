@@ -57,6 +57,7 @@
 #include "hw/misc/apple-silicon/spmi-baseband.h"
 #include "hw/misc/apple-silicon/spmi-pmu.h"
 #include "hw/misc/apple-silicon/tempsensor.h"
+#include "hw/misc/apple-silicon/gfx_asc.h"
 #include "hw/misc/unimp.h"
 #include "hw/nvram/apple_nvram.h"
 #include "hw/pci-host/apcie.h"
@@ -142,6 +143,9 @@
 
 #define ANS_SIZE (0x3D24000)
 #define SIO_SIZE (0x114000)
+// armfw_g12p spans 0xb4000 bytes (__TEXT 0x48000 + __DATA 0x6c000).
+// FIXME: the size iBoot reserves is unknown; this leaves room for a heap.
+#define GFX_ASC_SIZE (4 * MiB)
 #define PANIC_SIZE (0x100000)
 
 // Regions iBoot hands to the GPU's address translator (IOUAT), which reads
@@ -558,6 +562,10 @@ static void t8030_memory_setup(AppleT8030MachineState *t8030)
 
     t8030_rtkit_mem_setup(t8030, ca, "sio", "iop-sio-nub", SIO_SIZE);
     t8030_rtkit_mem_setup(t8030, ca, "ans", "iop-ans-nub", ANS_SIZE);
+    if (t8030->gfx) {
+        t8030_rtkit_mem_setup(t8030, ca, "gfx-asc", "iop-gfx-nub",
+                              GFX_ASC_SIZE);
+    }
 
     if (t8030->sep_rom_filename) {
         if (!g_file_get_contents(t8030->sep_rom_filename, &seprom, &fsize,
@@ -2206,11 +2214,46 @@ static const MemoryRegionOps t8030_sgx_id_ops = {
     .valid.max_access_size = 4,
 };
 
-// Experimental: expose the GPU and its coprocessor as logging stubs so that
-// the guest's accesses can be traced with `-d unimp`.
+// The GPU's firmware coprocessor, as a logging shell (see gfx_asc.c).
+static void t8030_create_gfx_asc(AppleT8030MachineState *t8030)
+{
+    AppleDTNode *child;
+    AppleDTProp *prop;
+    SysBusDevice *sbd;
+    uint64_t *reg;
+    uint32_t *ints;
+    uint32_t i;
+
+    child = apple_dt_get_node(t8030->device_tree, "arm-io/gfx-asc");
+    assert_nonnull(child);
+
+    sbd = apple_gfx_asc_create(child, APPLE_A7IOP_V4);
+    assert_nonnull(sbd);
+    object_property_add_child(OBJECT(t8030), "gfx-asc", OBJECT(sbd));
+
+    prop = apple_dt_get_prop(child, "reg");
+    assert_nonnull(prop);
+    reg = (uint64_t *)prop->data;
+    for (i = 0; i < 2; ++i) {
+        sysbus_mmio_map(sbd, i, t8030->armio_base + reg[i * 2]);
+    }
+
+    prop = apple_dt_get_prop(child, "interrupts");
+    assert_nonnull(prop);
+    ints = (uint32_t *)prop->data;
+    for (i = 0; i < prop->len / sizeof(uint32_t); ++i) {
+        sysbus_connect_irq(sbd, i,
+                           qdev_get_gpio_in(DEVICE(t8030->aic), ints[i]));
+    }
+
+    sysbus_realize_and_unref(sbd, &error_fatal);
+}
+
+// Experimental: expose the GPU as a logging stub so that the guest's accesses
+// can be traced with `-d unimp`.
 static void t8030_create_gfx_stubs(AppleT8030MachineState *t8030)
 {
-    static const char *const nodes[] = { "sgx", "gfx-asc" };
+    static const char *const nodes[] = { "sgx" };
     AppleDTNode *armio;
     AppleDTNode *child;
     AppleDTProp *prop;
@@ -3174,6 +3217,7 @@ static void t8030_init(MachineState *machine)
     t8030_create_misc(t8030);
     if (t8030->gfx) {
         t8030_create_gfx_stubs(t8030);
+        t8030_create_gfx_asc(t8030);
     }
 
     t8030_create_tempsensor(t8030, "tempsensor0", false);
