@@ -623,6 +623,25 @@ static const ARMCPRegInfo apple_a13_gxf_cp_reginfo[] = {
         .resetvalue = 0,
         .fieldoffset = offsetof(CPUARMState, sprr.mprr_el_br_el1[1][1]),
     },
+    {
+        // Written by the GPU coprocessor firmware (armfw_g12p) during SPRR
+        // setup, right after the EL0/EL1 BR1 permission tables, with two
+        // identical 32-bit halves (0x0000f6d80000f6d8). It sits one past the
+        // MPRR mask registers and looks like both masks packed into one
+        // register on that core. The name and meaning are inferred; it is
+        // stored and otherwise ignored.
+        .name = "MPRR_S3_6_C15_C3_5",
+        .cp = CP_REG_ARM64_SYSREG_CP,
+        .state = ARM_CP_STATE_AA64,
+        .opc0 = 3,
+        .opc1 = 6,
+        .crn = 15,
+        .crm = 3,
+        .opc2 = 5,
+        .access = PL1_RW,
+        .resetvalue = 0,
+        .fieldoffset = offsetof(CPUARMState, sprr.mprr_s3_6_c15_c3_5),
+    },
 };
 
 void apple_a13_init_gxf_override(AppleA13State *cpu)

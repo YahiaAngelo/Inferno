@@ -583,7 +583,9 @@ AppleA7IOPMailbox *apple_a7iop_mailbox_new(const char *role,
 
     sysbus_init_mmio(sbd, &s->mmio);
 
-    if (!strcmp(s->role, "SEP-iop")) {
+    // Coprocessors that run real firmware on their own CPU feed that CPU's
+    // timers back into this controller.
+    if (!strcmp(s->role, "SEP-iop") || !strcmp(s->role, "GFX-iop")) {
         qdev_init_gpio_in_named(DEVICE(s), apple_a7iop_gpio_timer0,
                                 APPLE_A7IOP_SEP_GPIO_TIMER0, 1);
         qdev_init_gpio_in_named(DEVICE(s), apple_a7iop_gpio_timer1,

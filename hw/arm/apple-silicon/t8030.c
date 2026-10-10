@@ -260,7 +260,10 @@ static void t8030_gfx_add_pmap_io_range(AppleT8030MachineState *t8030,
 
 static uint32_t t8030_real_cpu_count(AppleT8030MachineState *t8030)
 {
-    return MACHINE(t8030)->smp.cpus - (t8030->sep_fw_filename != NULL);
+    // The SEP and, when it runs real firmware, the GPU coprocessor each take
+    // one CPU after the application cores.
+    return MACHINE(t8030)->smp.cpus - (t8030->sep_fw_filename != NULL) -
+           (t8030->gfx && t8030->gfx_fw_filename != NULL);
 }
 
 static void t8030_start_cpus(AppleT8030MachineState *t8030, uint64_t cpu_mask)
@@ -2227,7 +2230,12 @@ static void t8030_create_gfx_asc(AppleT8030MachineState *t8030)
     child = apple_dt_get_node(t8030->device_tree, "arm-io/gfx-asc");
     assert_nonnull(child);
 
-    sbd = apple_gfx_asc_create(child, APPLE_A7IOP_V4);
+    if (t8030->gfx_fw_filename != NULL) {
+        sbd = apple_gfx_asc_fw_create(child, APPLE_A7IOP_V4, A13_MAX_CPU + 1,
+                                      t8030->gfx_fw_filename);
+    } else {
+        sbd = apple_gfx_asc_create(child, APPLE_A7IOP_V4);
+    }
     assert_nonnull(sbd);
     object_property_add_child(OBJECT(t8030), "gfx-asc", OBJECT(sbd));
 
@@ -2883,7 +2891,7 @@ static void t8030_cpu_reset(AppleT8030MachineState *t8030)
         arm_cpu->m_key_hi = m_hi;
 
         if (t8030->securerom_filename == NULL) {
-            if (acpu->cpu_id != A13_MAX_CPU) {
+            if (acpu->cpu_id < A13_MAX_CPU) {
                 object_property_set_uint(
                     OBJECT(cpu), "rvbar",
                     t8030->boot_info.kern_entry & ~0xFFFULL, &error_abort);
@@ -2895,7 +2903,7 @@ static void t8030_cpu_reset(AppleT8030MachineState *t8030)
                                t8030->boot_info.kern_boot_args_addr, 1, true);
             }
         } else {
-            if (acpu->cpu_id != A13_MAX_CPU) {
+            if (acpu->cpu_id < A13_MAX_CPU) {
                 object_property_set_uint(OBJECT(cpu), "rvbar", SROM_BASE,
                                          &error_abort);
                 cpu_reset(cpu);
@@ -2962,7 +2970,7 @@ static void t8030_init(MachineState *machine)
     }
 
     if (t8030->sep_fw_filename == NULL) {
-        if (machine->smp.cpus > A13_MAX_CPU) {
+        if (t8030_real_cpu_count(t8030) > A13_MAX_CPU) {
             error_setg(&error_fatal,
                        "Too many CPU cores specified for simulated SEP!");
             return;
@@ -3287,6 +3295,7 @@ PROP_VISIT_GETTER_SETTER(uint32, gfx_id_version);
 PROP_GETTER_SETTER(bool, force_dfu);
 PROP_GETTER_SETTER(int, usb_conn_type);
 PROP_STR_GETTER_SETTER(trustcache_filename);
+PROP_STR_GETTER_SETTER(gfx_fw_filename);
 PROP_STR_GETTER_SETTER(ticket_filename);
 PROP_STR_GETTER_SETTER(sep_rom_filename);
 PROP_STR_GETTER_SETTER(sep_fw_filename);
@@ -3310,7 +3319,7 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
     mc->desc = "Apple T8030 SoC (iPhone 11)";
     mc->init = t8030_init;
     mc->reset = t8030_reset;
-    mc->max_cpus = A13_MAX_CPU + 1;
+    mc->max_cpus = A13_MAX_CPU + 2; // + SEP + GPU coprocessor
     mc->auto_create_sdcard = false;
     mc->no_floppy = true;
     mc->no_cdrom = true;
@@ -3354,6 +3363,12 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
         klass, "gfx",
         "Expose the GPU (sgx) and its coprocessor (gfx-asc) to the guest. "
         "Experimental: both are register-logging stubs (-d unimp)");
+    object_class_property_add_str(klass, "gfx-fw", t8030_get_gfx_fw_filename,
+                                  t8030_set_gfx_fw_filename);
+    object_class_property_set_description(
+        klass, "gfx-fw",
+        "GPU firmware Mach-O (unwrapped Firmware/agx/armfw_*.im4p) to run on "
+        "the gfx-asc coprocessor; needs gfx=on and one more CPU in -smp");
     oprop = object_class_property_add(klass, "gfx-id-version", "uint32",
                                       t8030_get_gfx_id_version,
                                       t8030_set_gfx_id_version, NULL, NULL);

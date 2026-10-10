@@ -59,6 +59,7 @@ typedef struct {
     char *ticket_filename;
     char *sep_rom_filename;
     char *sep_fw_filename;
+    char *gfx_fw_filename;
     char *securerom_filename;
     uint32_t sio_protocol;
     uint32_t build_version;

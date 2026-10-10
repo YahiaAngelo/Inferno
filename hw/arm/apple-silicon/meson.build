@@ -12,6 +12,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'mt-spi.c',
     'sep-sim.c',
     'sep.c',
+    'gfx_asc_fw.c',
     'patcher.c',
     'kernel_patches.c',
     'lm-backlight.c',

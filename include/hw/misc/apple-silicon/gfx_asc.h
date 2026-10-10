@@ -29,4 +29,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(AppleGFXASCState, APPLE_GFX_ASC)
 SysBusDevice *apple_gfx_asc_create(AppleDTNode *node,
                                    AppleA7IOPVersion version);
 
+// Variant that runs the real GPU firmware (an RTKit Mach-O unwrapped from
+// Firmware/agx/armfw_*.im4p) on its own CPU instead of logging.
+SysBusDevice *apple_gfx_asc_fw_create(AppleDTNode *node,
+                                      AppleA7IOPVersion version,
+                                      uint32_t cpu_id, const char *fw_filename);
+
 #endif /* HW_MISC_APPLE_SILICON_GFX_ASC_H */
