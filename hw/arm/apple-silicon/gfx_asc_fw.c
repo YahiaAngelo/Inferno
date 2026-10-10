@@ -27,6 +27,7 @@
 #include "qemu/bswap.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
+#include "qemu/units.h"
 #include "system/address-spaces.h"
 #include "target/arm/cpu.h"
 
@@ -68,12 +69,93 @@ struct AppleGFXASCFWState {
     uint8_t *fw;
     gsize fw_size;
     hwaddr load_addr;
+    hwaddr wrapper_base;
+    hwaddr gptbat_base;
+    hwaddr ppl_shared_base;
 };
 
-// Copies every LC_SEGMENT_64 to `base`, relative to the lowest segment address.
+/*
+ * The firmware carries a table of values the bootloader fills in before
+ * starting it (the __rtk_patch_* symbols). Each entry is a four-character
+ * tag, a 32-bit length and the value, unaligned.
+ *
+ * The start code reads PTPB/PTPS (memory for its page tables: it points
+ * TTBR at PTPB and builds tables there on a cold boot) and GptS. The rest
+ * are read later.
+ *
+ * FIXME: which entries iBoot really patches, and with what, is inferred from
+ * the names and from how the start code uses them. Entries not listed here
+ * keep the values in the file.
+ */
+#define GFX_FW_PAGE_TABLE_OFFSET (2 * MiB)
+#define GFX_FW_PAGE_TABLE_SIZE (1 * MiB)
+#define GFX_FW_TIMER_FREQUENCY (24000000)
+
+static bool apple_gfx_asc_fw_patch(uint8_t *image, size_t size,
+                                   const char *tag, uint32_t len,
+                                   uint64_t value)
+{
+    uint8_t key[8];
+    uint8_t *found = NULL;
+    size_t i;
+
+    memcpy(key, tag, 4);
+    stl_le_p(key + 4, len);
+    for (i = 0; i + sizeof(key) + len <= size; i++) {
+        if (memcmp(image + i, key, sizeof(key)) == 0) {
+            if (found != NULL) {
+                return false; // ambiguous
+            }
+            found = image + i;
+        }
+    }
+    if (found == NULL) {
+        return false;
+    }
+    if (len == 8) {
+        stq_le_p(found + sizeof(key), value);
+    } else if (len == 4) {
+        stl_le_p(found + sizeof(key), value);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+static void apple_gfx_asc_fw_patch_all(AppleGFXASCFWState *s, uint8_t *image,
+                                       hwaddr base, uint64_t first_vm)
+{
+    hwaddr pt_base = base + GFX_FW_PAGE_TABLE_OFFSET;
+    const struct {
+        const char *tag;
+        uint32_t len;
+        uint64_t value;
+    } patches[] = {
+        { "dApC", 8, base }, // CPU physical address
+        { "dArW", 8, s->wrapper_base }, // CPU wrapper physical address
+        { "BPTP", 8, pt_base }, // page table base
+        { "SPTP", 8, GFX_FW_PAGE_TABLE_SIZE }, // page table size
+        { "BVTP", 8, first_vm + GFX_FW_PAGE_TABLE_OFFSET }, // ...virtual base
+        { "BtpG", 8, s->gptbat_base }, // UAT GPTBAT base
+        { "BlpP", 8, s->ppl_shared_base }, // UAT PPL shared base
+        { "qF8v", 4, GFX_FW_TIMER_FREQUENCY }, // ARMv8 timer frequency
+    };
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE(patches); i++) {
+        if (!apple_gfx_asc_fw_patch(image, s->fw_size, patches[i].tag,
+                                    patches[i].len, patches[i].value)) {
+            warn_report("gfx-asc: could not patch firmware entry '%s'",
+                        patches[i].tag);
+        }
+    }
+}
+
+// Copies every LC_SEGMENT_64 of a patched copy of the image to `base`,
+// relative to the lowest segment address.
 static bool apple_gfx_asc_fw_load(AppleGFXASCFWState *s, hwaddr base)
 {
-    const uint8_t *m = s->fw;
+    g_autofree uint8_t *m = g_memdup2(s->fw, s->fw_size);
     uint64_t first_vm = UINT64_MAX;
     uint32_t ncmds;
     size_t off;
@@ -123,6 +205,9 @@ static bool apple_gfx_asc_fw_load(AppleGFXASCFWState *s, hwaddr base)
         }
         if (first_vm == UINT64_MAX) {
             return false;
+        }
+        if (pass == 0) {
+            apple_gfx_asc_fw_patch_all(s, m, base, first_vm);
         }
     }
     return true;
@@ -265,6 +350,16 @@ static void apple_gfx_asc_fw_register_types(void)
 
 type_init(apple_gfx_asc_fw_register_types);
 
+void apple_gfx_asc_fw_set_platform(SysBusDevice *sbd, hwaddr wrapper_base,
+                                   hwaddr gptbat_base, hwaddr ppl_shared_base)
+{
+    AppleGFXASCFWState *s = APPLE_GFX_ASC_FW(sbd);
+
+    s->wrapper_base = wrapper_base;
+    s->gptbat_base = gptbat_base;
+    s->ppl_shared_base = ppl_shared_base;
+}
+
 SysBusDevice *apple_gfx_asc_fw_create(AppleDTNode *node,
                                       AppleA7IOPVersion version,
                                       uint32_t cpu_id, const char *fw_filename)
@@ -313,6 +408,11 @@ SysBusDevice *apple_gfx_asc_fw_create(AppleDTNode *node,
 
     // The physical ID only has to be unique; the SEP's CPU uses bit 30.
     s->cpu = &apple_a13_create("gfx-cpu", cpu_id, BIT(29), -1, 'G')->parent_obj;
+    // The firmware's bootstrap aborts with "!MIDR" unless the part number is
+    // one it knows: 0x00d, 0x00e, 0x00f, 0x014, 0x015, 0x026, 0x240..0x245 or
+    // 0x250..0x252. FIXME: the real GPU coprocessor's part number is unknown;
+    // 0x15 is on that list and is what this SoC's SEP core model uses.
+    s->cpu->midr = deposit64(s->cpu->midr, 4, 12, 0x15); // MIDR_EL1.PartNum
     object_property_add_child(OBJECT(dev), DEVICE(s->cpu)->id, OBJECT(s->cpu));
 
     apple_dt_set_prop_u32(child, "pre-loaded", 1);

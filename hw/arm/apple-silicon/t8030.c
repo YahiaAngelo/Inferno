@@ -734,6 +734,23 @@ static void t8030_memory_setup(AppleT8030MachineState *t8030)
         t8030_gfx_add_pmap_io_range(t8030, ttbat, GFX_TTBAT_SIZE, "TTBAT");
         t8030_gfx_add_pmap_io_range(t8030, handoff, GFX_HANDOFF_SIZE,
                                     "handoff page");
+
+        if (t8030->gfx_fw_filename != NULL) {
+            AppleDTNode *asc =
+                apple_dt_get_node(t8030->device_tree, "arm-io/gfx-asc");
+            AppleDTProp *asc_reg;
+            Object *asc_dev;
+
+            assert_nonnull(asc);
+            asc_reg = apple_dt_get_prop(asc, "reg");
+            assert_nonnull(asc_reg);
+            asc_dev = object_resolve_path_component(OBJECT(t8030), "gfx-asc");
+            assert_nonnull(asc_dev);
+            apple_gfx_asc_fw_set_platform(
+                SYS_BUS_DEVICE(asc_dev),
+                t8030->armio_base + ((uint64_t *)asc_reg->data)[0], ttbat,
+                shared);
+        }
     }
     // adjust framebuffer for verbose display.
     t8030->video_args.base_addr += adp_v4_get_fb_off(APPLE_DISPLAY_PIPE_V4(
