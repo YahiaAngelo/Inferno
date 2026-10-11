@@ -66,6 +66,7 @@
 #include "hw/ssi/ssi.h"
 #include "hw/usb/apple_typec.h"
 #include "hw/watchdog/apple_wdt.h"
+#include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "qemu/guest-random.h"
 #include "qemu/log.h"
@@ -2429,10 +2430,83 @@ static AgxEmu *t8030_agxemu(T8030GfxRegFile *rf)
 }
 #endif
 
+// Scene identifiers of the vertex and fragment data masters: the firmware
+// gives a fragment job the value its vertex job had.
+#define SGX_TA_SCENE (0x16C20)
+#define SGX_3D_SCENE (0x168C0)
+
+// Writes guest RAM (sparse) and the GPU register block to
+// <gfx-capture>/3d-<n>/ so the job can be replayed outside the emulator.
+static void t8030_sgx_capture(T8030GfxRegFile *rf)
+{
+    AppleT8030MachineState *t8030 = rf->t8030;
+    MachineState *machine = MACHINE(t8030);
+    g_autofree char *dir = g_strdup_printf("%s/3d-%u", t8030->gfx_capture_dir,
+                                           ++t8030->gfx_capture_count);
+    g_autofree char *ram_path = g_build_filename(dir, "ram.bin", NULL);
+    g_autofree char *regs_path = g_build_filename(dir, "regs.bin", NULL);
+    const size_t chunk = 1 * MiB;
+    g_autofree uint8_t *buf = g_malloc(chunk);
+    int fd;
+
+    if (g_mkdir_with_parents(dir, 0755) < 0) {
+        return;
+    }
+    g_file_set_contents(regs_path, (const char *)t8030->gfx_reg_data[0],
+                        0x20000, NULL);
+    // The vertex job of this scene may have been kicked several jobs ago:
+    // save the registers as they were then as well.
+    for (unsigned i = 0; i < ARRAY_SIZE(t8030->gfx_capture_ta); i++) {
+        uint8_t *ta = t8030->gfx_capture_ta[i];
+
+        if (ta != NULL && ldq_le_p(ta + SGX_TA_SCENE) ==
+                              ldq_le_p((uint8_t *)t8030->gfx_reg_data[0] +
+                                       SGX_3D_SCENE)) {
+            g_autofree char *ta_path =
+                g_build_filename(dir, "regs-ta.bin", NULL);
+
+            g_file_set_contents(ta_path, (const char *)ta, 0x20000, NULL);
+        }
+    }
+    fd = open(ram_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        return;
+    }
+    for (uint64_t off = 0; off < machine->ram_size; off += chunk) {
+        if (address_space_read(&address_space_memory, DRAM_BASE + off,
+                               MEMTXATTRS_UNSPECIFIED, buf,
+                               chunk) == MEMTX_OK &&
+            !buffer_is_zero(buf, chunk) &&
+            pwrite(fd, buf, chunk, off) != (ssize_t)chunk) {
+            break;
+        }
+    }
+    if (ftruncate(fd, machine->ram_size) < 0) {
+        // keep whatever was written
+    }
+    close(fd);
+    qemu_log_mask(LOG_UNIMP, "sgx: captured fragment job to %s\n", dir);
+}
+
 // Runs the kicked job with the renderer, if there is one. Rendering is
 // synchronous for now: the machine waits while a job is drawn.
 static void t8030_sgx_render(T8030GfxRegFile *rf, bool fragment)
 {
+    if (rf->idx == 0 && rf->t8030->gfx_capture_dir != NULL) {
+        AppleT8030MachineState *t8030 = rf->t8030;
+
+        if (fragment) {
+            t8030_sgx_capture(rf);
+        } else {
+            unsigned i = t8030->gfx_capture_ta_next++ %
+                         ARRAY_SIZE(t8030->gfx_capture_ta);
+
+            if (t8030->gfx_capture_ta[i] == NULL) {
+                t8030->gfx_capture_ta[i] = g_malloc(0x20000);
+            }
+            memcpy(t8030->gfx_capture_ta[i], t8030->gfx_reg_data[0], 0x20000);
+        }
+    }
 #ifdef CONFIG_AGXEMU
     if (rf->t8030->gfx_render && rf->idx == 0) {
         if (fragment) {
@@ -3624,6 +3698,7 @@ PROP_GETTER_SETTER(bool, force_dfu);
 PROP_GETTER_SETTER(int, usb_conn_type);
 PROP_STR_GETTER_SETTER(trustcache_filename);
 PROP_STR_GETTER_SETTER(gfx_fw_filename);
+PROP_STR_GETTER_SETTER(gfx_capture_dir);
 PROP_GETTER_SETTER(bool, gfx_null_render);
 PROP_GETTER_SETTER(bool, gfx_render);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event);
@@ -3700,6 +3775,13 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
         "Experimental: both are register-logging stubs (-d unimp)");
     object_class_property_add_str(klass, "gfx-fw", t8030_get_gfx_fw_filename,
                                   t8030_set_gfx_fw_filename);
+    object_class_property_add_str(klass, "gfx-capture",
+                                  t8030_get_gfx_capture_dir,
+                                  t8030_set_gfx_capture_dir);
+    object_class_property_set_description(
+        klass, "gfx-capture",
+        "Directory to dump guest RAM and GPU registers into at every "
+        "fragment job, for offline replay (needs gfx-null-render=on)");
     object_class_property_set_description(
         klass, "gfx-fw",
         "GPU firmware Mach-O (unwrapped Firmware/agx/armfw_*.im4p) to run on "

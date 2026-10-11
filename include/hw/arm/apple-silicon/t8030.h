@@ -81,6 +81,10 @@ typedef struct {
     uint32_t gfx_kick_count;
     uint32_t gfx_pause_on_3d;
     bool gfx_render;
+    char *gfx_capture_dir;
+    uint32_t gfx_capture_count;
+    uint8_t *gfx_capture_ta[8];
+    uint32_t gfx_capture_ta_next;
     hwaddr gfx_ttbat;
     void *gfx_emu; // AgxEmu when built with agxemu
     uint32_t gfx_3d_count;
