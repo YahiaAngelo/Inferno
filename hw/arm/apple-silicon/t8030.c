@@ -70,6 +70,7 @@
 #include "qemu/error-report.h"
 #include "qemu/guest-random.h"
 #include "qemu/log.h"
+#include "qemu/main-loop.h"
 #include "qemu/units.h"
 #include "system/reset.h"
 #include "system/runstate.h"
@@ -2488,9 +2489,8 @@ static void t8030_sgx_capture(T8030GfxRegFile *rf)
     qemu_log_mask(LOG_UNIMP, "sgx: captured fragment job to %s\n", dir);
 }
 
-// Runs the kicked job with the renderer, if there is one. Rendering is
-// synchronous for now: the machine waits while a job is drawn.
-static void t8030_sgx_render(T8030GfxRegFile *rf, bool fragment)
+// Capture hook, called at every vertex and fragment kick.
+static void t8030_sgx_capture_kick(T8030GfxRegFile *rf, bool fragment)
 {
     if (rf->idx == 0 && rf->t8030->gfx_capture_dir != NULL) {
         AppleT8030MachineState *t8030 = rf->t8030;
@@ -2507,31 +2507,91 @@ static void t8030_sgx_render(T8030GfxRegFile *rf, bool fragment)
             memcpy(t8030->gfx_capture_ta[i], t8030->gfx_reg_data[0], 0x20000);
         }
     }
-#ifdef CONFIG_AGXEMU
-    if (rf->t8030->gfx_render && rf->idx == 0) {
-        if (fragment) {
-            agxemu_fragment_job(t8030_agxemu(rf));
-        } else {
-            agxemu_vertex_job(t8030_agxemu(rf));
-        }
-    }
-#endif
 }
 
 // Up to two events packed as 16-bit (master bit << 8) | sub-status fields.
 // Before each kick the firmware writes the job's slot number to a per-type
 // register (0x100 when the type is idle); when that is valid the sub-status
 // reported is that slot's bit instead of the packed one.
-static void t8030_sgx_raise_events(T8030GfxRegFile *rf, uint32_t events,
-                                   hwaddr slot_reg)
+static void t8030_sgx_raise_events_slot(T8030GfxRegFile *rf, uint32_t events,
+                                        uint32_t slot)
 {
-    uint8_t *regs = (uint8_t *)rf->t8030->gfx_reg_data[rf->idx] - rf->base;
-    uint32_t slot = ldl_le_p(regs + slot_reg);
-
     for (; events != 0; events >>= 16) {
         t8030_sgx_raise_event(rf, (events >> 8) & 0xFF,
                               slot < 32 ? BIT(slot) : (events & 0xFF));
     }
+}
+
+static void t8030_sgx_raise_events(T8030GfxRegFile *rf, uint32_t events,
+                                   hwaddr slot_reg)
+{
+    uint8_t *regs = (uint8_t *)rf->t8030->gfx_reg_data[rf->idx] - rf->base;
+
+    t8030_sgx_raise_events_slot(rf, events, ldl_le_p(regs + slot_reg));
+}
+
+// A vertex or fragment job was kicked: draw it if there is a renderer, then
+// report it finished.
+//
+// The job is drawn inside the kick, on the firmware CPU's thread, with the
+// global lock released: the application processors keep running and only the
+// GPU firmware waits. Reporting completion later from a separate thread does
+// not work yet: the firmware stops any job still in flight about 5 ms after
+// its kick and power-cycles the GPU, for a reason not yet understood
+// (its idle check at firmware 0x11940 passes while the job runs).
+static void t8030_sgx_job(T8030GfxRegFile *rf, bool fragment, uint32_t events,
+                          hwaddr slot_reg)
+{
+    AppleT8030MachineState *t8030 = rf->t8030;
+
+    t8030_sgx_capture_kick(rf, fragment);
+#ifdef CONFIG_AGXEMU
+    if (t8030->gfx_render && rf->idx == 0) {
+        AgxEmu *emu = t8030_agxemu(rf);
+        // gfx-capture keeps the lock so that each capture is consistent
+        bool unlock = t8030->gfx_capture_dir == NULL &&
+                      !t8030->gfx_render_sync && bql_locked();
+
+        if (unlock) {
+            bql_unlock();
+        }
+        if (fragment) {
+            agxemu_fragment_job(emu);
+        } else {
+            agxemu_vertex_job(emu);
+        }
+        if (unlock) {
+            bql_lock();
+        }
+    }
+#endif
+    t8030_sgx_raise_events(rf, events, slot_reg);
+}
+
+// Debug: logs the firmware's call stack at a register access.
+static void t8030_sgx_log_caller(const char *what)
+{
+    CPUARMState *env;
+    uint64_t fp;
+
+    if (current_cpu == NULL || !qemu_loglevel_mask(LOG_UNIMP)) {
+        return;
+    }
+    env = &ARM_CPU(current_cpu)->env;
+    fp = env->xregs[29];
+    qemu_log("sgx: %s from pc 0x%" PRIx64 " lr 0x%" PRIx64, what,
+             (uint64_t)env->pc, (uint64_t)env->xregs[30]);
+    for (unsigned i = 0; i < 10 && fp != 0; i++) {
+        uint64_t frame[2];
+
+        if (cpu_memory_rw_debug(current_cpu, fp, frame, sizeof(frame),
+                                false) != 0) {
+            break;
+        }
+        qemu_log(" < 0x%" PRIx64, frame[1]);
+        fp = frame[0];
+    }
+    qemu_log("\n");
 }
 
 static uint64_t t8030_sgx_regs_read(void *opaque, hwaddr addr, unsigned size)
@@ -2557,6 +2617,10 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
                   "sgx.regs[%u]: write (size %u, offset 0x%06" HWADDR_PRIx
                   ") = 0x%" PRIx64 "\n",
                   rf->idx, size, addr, data);
+    if ((rf->base + addr == SGX_TA_START || rf->base + addr == SGX_3D_START) &&
+        data != 1) {
+        t8030_sgx_log_caller("start register");
+    }
     if (rf->base + addr == SGX_PWR_STATE) {
         data &= ~(uint64_t)SGX_PWR_STATE_BUSY;
     } else if (rf->base + addr == SGX_CTX_CMD ||
@@ -2579,9 +2643,7 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
                rf->t8030->gfx_asc_fw != NULL) {
         // No renderer yet: report the vertex job as finished straight away.
         stn_le_p(p, size, data);
-        t8030_sgx_render(rf, false);
-        t8030_sgx_raise_events(rf, rf->t8030->gfx_null_event,
-                               SGX_TA_SLOT);
+        t8030_sgx_job(rf, false, rf->t8030->gfx_null_event, SGX_TA_SLOT);
         return;
     } else if (rf->base + addr == SGX_3D_START && (data & 1) &&
                rf->t8030->gfx_pause_on_3d != 0 &&
@@ -2602,9 +2664,7 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
         stq_le_p((uint8_t *)rf->t8030->gfx_reg_data[rf->idx] +
                      (SGX_3D_STATUS - rf->base),
                  SGX_3D_STATUS_COMPLETE);
-        t8030_sgx_render(rf, true);
-        t8030_sgx_raise_events(rf, rf->t8030->gfx_null_event_3d,
-                               SGX_3D_SLOT);
+        t8030_sgx_job(rf, true, rf->t8030->gfx_null_event_3d, SGX_3D_SLOT);
         return;
     } else if (rf->base + addr == SGX_CP_START && (data & 1) &&
                rf->t8030->gfx_null_render &&
@@ -3701,6 +3761,7 @@ PROP_STR_GETTER_SETTER(gfx_fw_filename);
 PROP_STR_GETTER_SETTER(gfx_capture_dir);
 PROP_GETTER_SETTER(bool, gfx_null_render);
 PROP_GETTER_SETTER(bool, gfx_render);
+PROP_GETTER_SETTER(bool, gfx_render_sync);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_3d);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_cp);
@@ -3839,6 +3900,13 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
         klass, "gfx-render",
         "Render GPU jobs with the agxemu library before reporting them "
         "finished (needs gfx-null-render=on and a build with -Dagxemu=...)");
+    object_class_property_add_bool(klass, "gfx-render-sync",
+                                   t8030_get_gfx_render_sync,
+                                   t8030_set_gfx_render_sync);
+    object_class_property_set_description(
+        klass, "gfx-render-sync",
+        "Debug: keep the global lock while a job is drawn, stalling the "
+        "whole guest meanwhile");
     object_class_property_add_bool(klass, "gfx-null-render",
                                    t8030_get_gfx_null_render,
                                    t8030_set_gfx_null_render);

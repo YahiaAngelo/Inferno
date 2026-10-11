@@ -21,6 +21,7 @@
 #ifndef HW_ARM_APPLE_SILICON_T8030_H
 #define HW_ARM_APPLE_SILICON_T8030_H
 
+#include "qemu/thread.h"
 #include "qemu/osdep.h"
 #include "exec/hwaddr.h"
 #include "hw/arm/apple-silicon/a13.h"
@@ -81,6 +82,7 @@ typedef struct {
     uint32_t gfx_kick_count;
     uint32_t gfx_pause_on_3d;
     bool gfx_render;
+    bool gfx_render_sync;
     char *gfx_capture_dir;
     uint32_t gfx_capture_count;
     uint8_t *gfx_capture_ta[8];
