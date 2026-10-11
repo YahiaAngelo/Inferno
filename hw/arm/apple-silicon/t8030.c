@@ -2204,9 +2204,26 @@ static uint64_t t8030_sgx_id_read(void *opaque, hwaddr addr, unsigned size)
         // FIXME: 1 x 1 clusters of 4 cores is a guess for G12P.
         value = 0x00010104;
         break;
+    case SGX_ID_UNK08:
+        value = 0x8002; // as on M1; meaning unknown
+        break;
+    case SGX_ID_COUNTS_2:
+        // Bits 16..23: number of geometry processors (Asahi's num_gps). With
+        // zero the guest gives vertex jobs an empty resource mask and the
+        // firmware never schedules them. FIXME: 2 and the 0x04 in bits 8..15
+        // are modelled on the M1 values, a guess for G12P; the count matches
+        // the low nibble of SGX_ID_CLUSTERS.
+        value = 0x00010400;
+        break;
+    case SGX_ID_UNK18:
+        value = 0x10000; // as on M1; meaning unknown
+        break;
     case SGX_ID_CLUSTERS:
-        // Bits 12..19: number of clusters. FIXME: the rest is a guess.
-        value = 1 << 12;
+        // Bits 12..19: number of clusters. Bits 0..3: number of geometry
+        // processors as the firmware counts them (it builds the vertex data
+        // master's resource mask from this; zero means vertex jobs can never
+        // be scheduled). FIXME: one of each is a guess for G12P.
+        value = (1 << 12) | 1;
         break;
     default:
         value = 0;
@@ -2295,7 +2312,10 @@ typedef struct {
 // (id << 8) | 1 or 3; the firmware waits for bit 0 to clear. What the
 // command does (it looks like a context/TLB flush) is not known.
 #define SGX_CTX_CMD (0x16870)
+#define SGX_CTX_CMD2 (0x16878) // same protocol, sent before a job starts
 #define SGX_CTX_CMD_BUSY BIT(0)
+#define SGX_REQ_16860 (0x16860)
+#define SGX_ACK_16868 (0x16868)
 
 static uint64_t t8030_sgx_regs_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -2322,8 +2342,15 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
                   rf->idx, size, addr, data);
     if (rf->base + addr == SGX_PWR_STATE) {
         data &= ~(uint64_t)SGX_PWR_STATE_BUSY;
-    } else if (rf->base + addr == SGX_CTX_CMD) {
+    } else if (rf->base + addr == SGX_CTX_CMD ||
+               rf->base + addr == SGX_CTX_CMD2) {
         data &= ~(uint64_t)SGX_CTX_CMD_BUSY;
+    } else if (rf->base + addr == SGX_REQ_16860) {
+        // Request/acknowledge pair: the firmware writes the request and
+        // polls the next register until it follows. Purpose unknown.
+        stn_le_p((uint8_t *)rf->t8030->gfx_reg_data[rf->idx] +
+                     (SGX_ACK_16868 - rf->base),
+                 size, data);
     }
     stn_le_p(p, size, data);
 }
