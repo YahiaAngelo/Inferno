@@ -76,6 +76,7 @@ typedef struct {
     bool gfx_null_render;
     uint32_t gfx_null_event;
     uint32_t gfx_null_event_3d;
+    uint32_t gfx_null_event_cp;
     SysBusDevice *gfx_asc_fw;
     MemoryRegion gfx_id;
     MemoryRegion gfx_regs[4];

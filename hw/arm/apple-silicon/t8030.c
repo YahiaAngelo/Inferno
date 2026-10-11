@@ -2321,6 +2321,10 @@ typedef struct {
 #define SGX_REQ_16860 (0x16860)
 #define SGX_TA_START (0x10100) // written with 1 after a vertex job is set up
 #define SGX_3D_START (0x10040) // same for a fragment job
+#define SGX_CP_START (0x10180) // same for a compute job
+#define SGX_3D_SLOT (0x100E0)
+#define SGX_TA_SLOT (0x100E8)
+#define SGX_CP_SLOT (0x100F0)
 #define SGX_3D_STATUS (0x16038)
 #define SGX_3D_STATUS_COMPLETE BIT(0)
 #define SGX_ACK_16868 (0x16868)
@@ -2384,10 +2388,18 @@ static void t8030_sgx_raise_event(T8030GfxRegFile *rf, unsigned bit,
 }
 
 // Up to two events packed as 16-bit (master bit << 8) | sub-status fields.
-static void t8030_sgx_raise_events(T8030GfxRegFile *rf, uint32_t events)
+// Before each kick the firmware writes the job's slot number to a per-type
+// register (0x100 when the type is idle); when that is valid the sub-status
+// reported is that slot's bit instead of the packed one.
+static void t8030_sgx_raise_events(T8030GfxRegFile *rf, uint32_t events,
+                                   hwaddr slot_reg)
 {
+    uint8_t *regs = (uint8_t *)rf->t8030->gfx_reg_data[rf->idx] - rf->base;
+    uint32_t slot = ldl_le_p(regs + slot_reg);
+
     for (; events != 0; events >>= 16) {
-        t8030_sgx_raise_event(rf, (events >> 8) & 0xFF, events & 0xFF);
+        t8030_sgx_raise_event(rf, (events >> 8) & 0xFF,
+                              slot < 32 ? BIT(slot) : (events & 0xFF));
     }
 }
 
@@ -2425,7 +2437,8 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
                rf->t8030->gfx_asc_fw != NULL) {
         // No renderer yet: report the vertex job as finished straight away.
         stn_le_p(p, size, data);
-        t8030_sgx_raise_events(rf, rf->t8030->gfx_null_event);
+        t8030_sgx_raise_events(rf, rf->t8030->gfx_null_event,
+                               SGX_TA_SLOT);
         return;
     } else if (rf->base + addr == SGX_3D_START && (data & 1) &&
                rf->t8030->gfx_null_render &&
@@ -2437,7 +2450,15 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
         stq_le_p((uint8_t *)rf->t8030->gfx_reg_data[rf->idx] +
                      (SGX_3D_STATUS - rf->base),
                  SGX_3D_STATUS_COMPLETE);
-        t8030_sgx_raise_events(rf, rf->t8030->gfx_null_event_3d);
+        t8030_sgx_raise_events(rf, rf->t8030->gfx_null_event_3d,
+                               SGX_3D_SLOT);
+        return;
+    } else if (rf->base + addr == SGX_CP_START && (data & 1) &&
+               rf->t8030->gfx_null_render &&
+               rf->t8030->gfx_asc_fw != NULL) {
+        stn_le_p(p, size, data);
+        t8030_sgx_raise_events(rf, rf->t8030->gfx_null_event_cp,
+                               SGX_CP_SLOT);
         return;
     } else if (rf->base + addr == SGX_EVENT_CLEAR) {
         // Write-one-to-clear for the master status word.
@@ -3527,6 +3548,7 @@ PROP_STR_GETTER_SETTER(gfx_fw_filename);
 PROP_GETTER_SETTER(bool, gfx_null_render);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_3d);
+PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_cp);
 PROP_STR_GETTER_SETTER(ticket_filename);
 PROP_STR_GETTER_SETTER(sep_rom_filename);
 PROP_STR_GETTER_SETTER(sep_fw_filename);
@@ -3625,6 +3647,15 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
     object_class_property_set_description(
         klass, "gfx-null-event-3d",
         "Experiment: the same for a fragment job");
+    oprop = object_class_property_add(klass, "gfx-null-event-cp", "uint32",
+                                      t8030_get_gfx_null_event_cp,
+                                      t8030_set_gfx_null_event_cp, NULL,
+                                      NULL);
+    // The firmware waits on master bit 17 after a compute kick.
+    object_property_set_default_uint(oprop, (17 << 8) | 1);
+    object_class_property_set_description(
+        klass, "gfx-null-event-cp",
+        "Experiment: the same for a compute job");
     object_class_property_add_bool(klass, "gfx-null-render",
                                    t8030_get_gfx_null_render,
                                    t8030_set_gfx_null_render);

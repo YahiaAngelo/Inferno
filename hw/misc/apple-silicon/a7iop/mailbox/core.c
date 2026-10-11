@@ -46,6 +46,21 @@
 #define CTRL_COUNT_MASK (MAX_MESSAGE_COUNT << CTRL_COUNT_SHIFT)
 #define CTRL_COUNT(v) (((v) << CTRL_COUNT_SHIFT) & CTRL_COUNT_MASK)
 
+// The SEP enables its timers by writing 0xe; the GPU firmware writes 0xa to
+// both. What the individual bits mean is not known, so the GPU case is
+// matched by value rather than by loosening the SEP check.
+#define REG_KIC_TMR_EN_GFX (BIT(3) | BIT(1))
+
+static bool apple_a7iop_mailbox_timer_enabled(AppleA7IOPMailbox *s,
+                                              uint32_t enabled)
+{
+    if ((enabled & REG_KIC_TMR_EN_MASK) == REG_KIC_TMR_EN_MASK) {
+        return true;
+    }
+    return !strcmp(s->role, "GFX-iop") &&
+           (enabled & REG_KIC_TMR_EN_MASK) == REG_KIC_TMR_EN_GFX;
+}
+
 static bool is_interrupt_enabled(AppleA7IOPMailbox *s, uint32_t status)
 {
     if (!s->sepd_enabled) {
@@ -93,7 +108,7 @@ static bool is_interrupt_enabled(AppleA7IOPMailbox *s, uint32_t status)
         //     // this approach breaks 14beta5
         //     return false;
         // } else
-        if ((s->timer0_enabled & REG_KIC_TMR_EN_MASK) == REG_KIC_TMR_EN_MASK &&
+        if (apple_a7iop_mailbox_timer_enabled(s, s->timer0_enabled) &&
             (s->timer0_masked & REG_KIC_TMR_INT_MASK_MASK) == 0) {
             return true;
         }
@@ -104,7 +119,7 @@ static bool is_interrupt_enabled(AppleA7IOPMailbox *s, uint32_t status)
         //     // this approach breaks 14beta5
         //     return false;
         // } else
-        if ((s->timer1_enabled & REG_KIC_TMR_EN_MASK) == REG_KIC_TMR_EN_MASK &&
+        if (apple_a7iop_mailbox_timer_enabled(s, s->timer1_enabled) &&
             (s->timer1_masked & REG_KIC_TMR_INT_MASK_MASK) == 0) {
             return true;
         }
