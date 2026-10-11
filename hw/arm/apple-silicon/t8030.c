@@ -722,6 +722,8 @@ static void t8030_memory_setup(AppleT8030MachineState *t8030)
         assert_nonnull(sgx);
         hwaddr shared = carveout_alloc_mem(ca, GFX_SHARED_REGION_SIZE);
         hwaddr ttbat = carveout_alloc_mem(ca, GFX_TTBAT_SIZE);
+
+        t8030->gfx_ttbat = ttbat;
         hwaddr handoff = carveout_alloc_mem(ca, GFX_HANDOFF_SIZE);
 
         apple_dt_set_prop_u64(sgx, "gfx-shared-region-base", shared);
@@ -2387,6 +2389,61 @@ static void t8030_sgx_raise_event(T8030GfxRegFile *rf, unsigned bit,
     apple_gfx_asc_fw_raise_irq(rf->t8030->gfx_asc_fw, SGX_GFX_EVENT_IRQ);
 }
 
+#ifdef CONFIG_AGXEMU
+#include "agxemu/agxemu.h"
+
+static bool t8030_agxemu_read(void *opaque, uint64_t addr, void *buf,
+                              size_t len)
+{
+    return address_space_read(&address_space_memory, addr,
+                              MEMTXATTRS_UNSPECIFIED, buf, len) == MEMTX_OK;
+}
+
+static bool t8030_agxemu_write(void *opaque, uint64_t addr, const void *buf,
+                               size_t len)
+{
+    return address_space_write(&address_space_memory, addr,
+                               MEMTXATTRS_UNSPECIFIED, buf, len) == MEMTX_OK;
+}
+
+static void t8030_agxemu_log(void *opaque, const char *line)
+{
+    qemu_log_mask(LOG_UNIMP, "agxemu: %s\n", line);
+}
+
+static AgxEmu *t8030_agxemu(T8030GfxRegFile *rf)
+{
+    AppleT8030MachineState *t8030 = rf->t8030;
+
+    if (t8030->gfx_emu == NULL) {
+        AgxEmuHost host = {
+            .read_phys = t8030_agxemu_read,
+            .write_phys = t8030_agxemu_write,
+            .log = t8030_agxemu_log,
+        };
+
+        t8030->gfx_emu = agxemu_new(&host, t8030->gfx_ttbat,
+                                    (const uint8_t *)t8030->gfx_reg_data[0]);
+    }
+    return t8030->gfx_emu;
+}
+#endif
+
+// Runs the kicked job with the renderer, if there is one. Rendering is
+// synchronous for now: the machine waits while a job is drawn.
+static void t8030_sgx_render(T8030GfxRegFile *rf, bool fragment)
+{
+#ifdef CONFIG_AGXEMU
+    if (rf->t8030->gfx_render && rf->idx == 0) {
+        if (fragment) {
+            agxemu_fragment_job(t8030_agxemu(rf));
+        } else {
+            agxemu_vertex_job(t8030_agxemu(rf));
+        }
+    }
+#endif
+}
+
 // Up to two events packed as 16-bit (master bit << 8) | sub-status fields.
 // Before each kick the firmware writes the job's slot number to a per-type
 // register (0x100 when the type is idle); when that is valid the sub-status
@@ -2448,6 +2505,7 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
                rf->t8030->gfx_asc_fw != NULL) {
         // No renderer yet: report the vertex job as finished straight away.
         stn_le_p(p, size, data);
+        t8030_sgx_render(rf, false);
         t8030_sgx_raise_events(rf, rf->t8030->gfx_null_event,
                                SGX_TA_SLOT);
         return;
@@ -2470,6 +2528,7 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
         stq_le_p((uint8_t *)rf->t8030->gfx_reg_data[rf->idx] +
                      (SGX_3D_STATUS - rf->base),
                  SGX_3D_STATUS_COMPLETE);
+        t8030_sgx_render(rf, true);
         t8030_sgx_raise_events(rf, rf->t8030->gfx_null_event_3d,
                                SGX_3D_SLOT);
         return;
@@ -3566,6 +3625,7 @@ PROP_GETTER_SETTER(int, usb_conn_type);
 PROP_STR_GETTER_SETTER(trustcache_filename);
 PROP_STR_GETTER_SETTER(gfx_fw_filename);
 PROP_GETTER_SETTER(bool, gfx_null_render);
+PROP_GETTER_SETTER(bool, gfx_render);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_3d);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_cp);
@@ -3691,6 +3751,12 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
     object_class_property_set_description(
         klass, "gfx-pause-on-3d",
         "Debug: the same at the Nth fragment job kick; 0 = off");
+    object_class_property_add_bool(klass, "gfx-render", t8030_get_gfx_render,
+                                   t8030_set_gfx_render);
+    object_class_property_set_description(
+        klass, "gfx-render",
+        "Render GPU jobs with the agxemu library before reporting them "
+        "finished (needs gfx-null-render=on and a build with -Dagxemu=...)");
     object_class_property_add_bool(klass, "gfx-null-render",
                                    t8030_get_gfx_null_render,
                                    t8030_set_gfx_null_render);

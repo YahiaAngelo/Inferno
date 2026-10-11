@@ -80,6 +80,9 @@ typedef struct {
     uint32_t gfx_pause_on_kick;
     uint32_t gfx_kick_count;
     uint32_t gfx_pause_on_3d;
+    bool gfx_render;
+    hwaddr gfx_ttbat;
+    void *gfx_emu; // AgxEmu when built with agxemu
     uint32_t gfx_3d_count;
     SysBusDevice *gfx_asc_fw;
     MemoryRegion gfx_id;

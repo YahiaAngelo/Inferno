@@ -164,6 +164,8 @@ option('libcbor', type : 'feature', value : 'auto',
        description: 'libcbor support')
 option('gnutls', type : 'feature', value : 'auto',
        description: 'GNUTLS cryptography support')
+option('agxemu', type : 'string', value : '',
+       description: 'path to an agxemu checkout with a build in build/ (Apple GPU hardware emulation for the t8030 gfx option)')
 option('nettle', type : 'feature', value : 'auto',
        description: 'nettle cryptography support')
 option('gcrypt', type : 'feature', value : 'auto',
