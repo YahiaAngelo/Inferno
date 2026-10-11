@@ -2330,6 +2330,7 @@ typedef struct {
 #define SGX_TA_SLOT (0x100E8)
 #define SGX_CP_SLOT (0x100F0)
 #define SGX_3D_STATUS (0x16038)
+#define SGX_PROGRESS_DATA (0x1EC08)
 #define SGX_3D_STATUS_COMPLETE BIT(0)
 #define SGX_ACK_16868 (0x16868)
 
@@ -2530,15 +2531,55 @@ static void t8030_sgx_raise_events(T8030GfxRegFile *rf, uint32_t events,
     t8030_sgx_raise_events_slot(rf, events, ldl_le_p(regs + slot_reg));
 }
 
+// Debug: logs the firmware's call stack at a register access.
+G_GNUC_UNUSED static void t8030_sgx_log_caller(const char *what)
+{
+    CPUARMState *env;
+    uint64_t fp;
+
+    if (current_cpu == NULL || !qemu_loglevel_mask(LOG_UNIMP)) {
+        return;
+    }
+    env = &ARM_CPU(current_cpu)->env;
+    fp = env->xregs[29];
+    qemu_log("sgx: %s from pc 0x%" PRIx64 " lr 0x%" PRIx64, what,
+             (uint64_t)env->pc, (uint64_t)env->xregs[30]);
+    for (unsigned i = 0; i < 10 && fp != 0; i++) {
+        uint64_t frame[2];
+
+        if (cpu_memory_rw_debug(current_cpu, fp, frame, sizeof(frame),
+                                false) != 0) {
+            break;
+        }
+        qemu_log(" < 0x%" PRIx64, frame[1]);
+        fp = frame[0];
+    }
+    qemu_log("\n");
+}
+
 // A vertex or fragment job was kicked: draw it if there is a renderer, then
 // report it finished.
 //
 // The job is drawn inside the kick, on the firmware CPU's thread, with the
 // global lock released: the application processors keep running and only the
-// GPU firmware waits. Reporting completion later from a separate thread does
-// not work yet: the firmware stops any job still in flight about 5 ms after
-// its kick and power-cycles the GPU, for a reason not yet understood
-// (its idle check at firmware 0x11940 passes while the job runs).
+// GPU firmware waits, as if the hardware were infinitely fast. (A renderer
+// that finishes elsewhere, such as on the host GPU, can wait for it here the
+// same way.)
+//
+// Reporting completion some time after the kick, as real hardware does, was
+// tried and works, but buys nothing while costing a spinning firmware CPU.
+// What the firmware does with a job that is still running:
+//  - On every scheduler tick it samples the data master's progress
+//    registers through an indirect port (see SGX_PROGRESS_DATA); after four
+//    ticks without change it takes the GPU for hung and power-cycles it.
+//  - When an event arrives while the GPU is idle it first requests a
+//    power-down, then kicks the job the event brought, then acts on the
+//    power-down: it writes 2 to the job's start register and reads it back.
+//    Bits 16..18 non-zero mean "still running, stop pending" and it polls
+//    until they clear; zero means stopped, and it takes the job back,
+//    power-cycles and kicks the same job again (same scene and stream
+//    registers). With a slow renderer that cycle repeats until the job is
+//    done, so a late completion has to be matched to the current kick.
 static void t8030_sgx_job(T8030GfxRegFile *rf, bool fragment, uint32_t events,
                           hwaddr slot_reg)
 {
@@ -2568,38 +2609,19 @@ static void t8030_sgx_job(T8030GfxRegFile *rf, bool fragment, uint32_t events,
     t8030_sgx_raise_events(rf, events, slot_reg);
 }
 
-// Debug: logs the firmware's call stack at a register access.
-static void t8030_sgx_log_caller(const char *what)
-{
-    CPUARMState *env;
-    uint64_t fp;
-
-    if (current_cpu == NULL || !qemu_loglevel_mask(LOG_UNIMP)) {
-        return;
-    }
-    env = &ARM_CPU(current_cpu)->env;
-    fp = env->xregs[29];
-    qemu_log("sgx: %s from pc 0x%" PRIx64 " lr 0x%" PRIx64, what,
-             (uint64_t)env->pc, (uint64_t)env->xregs[30]);
-    for (unsigned i = 0; i < 10 && fp != 0; i++) {
-        uint64_t frame[2];
-
-        if (cpu_memory_rw_debug(current_cpu, fp, frame, sizeof(frame),
-                                false) != 0) {
-            break;
-        }
-        qemu_log(" < 0x%" PRIx64, frame[1]);
-        fp = frame[0];
-    }
-    qemu_log("\n");
-}
-
 static uint64_t t8030_sgx_regs_read(void *opaque, hwaddr addr, unsigned size)
 {
     T8030GfxRegFile *rf = opaque;
     uint8_t *p = (uint8_t *)rf->t8030->gfx_reg_data[rf->idx] + addr;
     uint64_t v = ldn_le_p(p, size);
 
+    if (rf->base + addr == SGX_PROGRESS_DATA) {
+        // Indirect read port (register selected by a write to +0x1ec00):
+        // the firmware's hang detection samples progress registers through
+        // it while a job runs. No progress is modelled, so report motion.
+        // (Not reached while jobs complete inside their kick.)
+        v = ++rf->t8030->gfx_progress_count;
+    }
     qemu_log_mask(LOG_UNIMP,
                   "sgx.regs[%u]: read  (size %u, offset 0x%06" HWADDR_PRIx
                   ") = 0x%" PRIx64 "\n",
@@ -2617,10 +2639,6 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
                   "sgx.regs[%u]: write (size %u, offset 0x%06" HWADDR_PRIx
                   ") = 0x%" PRIx64 "\n",
                   rf->idx, size, addr, data);
-    if ((rf->base + addr == SGX_TA_START || rf->base + addr == SGX_3D_START) &&
-        data != 1) {
-        t8030_sgx_log_caller("start register");
-    }
     if (rf->base + addr == SGX_PWR_STATE) {
         data &= ~(uint64_t)SGX_PWR_STATE_BUSY;
     } else if (rf->base + addr == SGX_CTX_CMD ||

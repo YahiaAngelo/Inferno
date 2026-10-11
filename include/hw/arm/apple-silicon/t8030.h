@@ -83,6 +83,7 @@ typedef struct {
     uint32_t gfx_pause_on_3d;
     bool gfx_render;
     bool gfx_render_sync;
+    uint64_t gfx_progress_count;
     char *gfx_capture_dir;
     uint32_t gfx_capture_count;
     uint8_t *gfx_capture_ta[8];
