@@ -79,6 +79,8 @@ typedef struct {
     uint32_t gfx_null_event_cp;
     uint32_t gfx_pause_on_kick;
     uint32_t gfx_kick_count;
+    uint32_t gfx_pause_on_3d;
+    uint32_t gfx_3d_count;
     SysBusDevice *gfx_asc_fw;
     MemoryRegion gfx_id;
     MemoryRegion gfx_regs[4];

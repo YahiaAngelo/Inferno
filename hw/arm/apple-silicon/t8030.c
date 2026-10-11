@@ -2452,6 +2452,15 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
                                SGX_TA_SLOT);
         return;
     } else if (rf->base + addr == SGX_3D_START && (data & 1) &&
+               rf->t8030->gfx_pause_on_3d != 0 &&
+               ++rf->t8030->gfx_3d_count == rf->t8030->gfx_pause_on_3d) {
+        stn_le_p(p, size, data);
+        qemu_log_mask(LOG_UNIMP, "sgx: pausing at fragment kick %u\n",
+                      rf->t8030->gfx_3d_count);
+        qemu_system_vmstop_request_prepare();
+        qemu_system_vmstop_request(RUN_STATE_PAUSED);
+        return;
+    } else if (rf->base + addr == SGX_3D_START && (data & 1) &&
                rf->t8030->gfx_null_render &&
                rf->t8030->gfx_asc_fw != NULL) {
         stn_le_p(p, size, data);
@@ -3561,6 +3570,7 @@ PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_3d);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_cp);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_pause_on_kick);
+PROP_VISIT_GETTER_SETTER(uint32, gfx_pause_on_3d);
 PROP_STR_GETTER_SETTER(ticket_filename);
 PROP_STR_GETTER_SETTER(sep_rom_filename);
 PROP_STR_GETTER_SETTER(sep_fw_filename);
@@ -3675,6 +3685,12 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
         klass, "gfx-pause-on-kick",
         "Debug: pause the machine at the Nth vertex job kick, leaving the "
         "job in flight; 0 = off");
+    object_class_property_add(klass, "gfx-pause-on-3d", "uint32",
+                              t8030_get_gfx_pause_on_3d,
+                              t8030_set_gfx_pause_on_3d, NULL, NULL);
+    object_class_property_set_description(
+        klass, "gfx-pause-on-3d",
+        "Debug: the same at the Nth fragment job kick; 0 = off");
     object_class_property_add_bool(klass, "gfx-null-render",
                                    t8030_get_gfx_null_render,
                                    t8030_set_gfx_null_render);
