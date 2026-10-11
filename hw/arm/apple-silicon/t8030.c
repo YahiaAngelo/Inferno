@@ -2433,6 +2433,17 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
                rf->base + addr == SGX_TA_FINISH_CMD) {
         data &= ~(uint64_t)SGX_CTX_CMD_BUSY;
     } else if (rf->base + addr == SGX_TA_START && (data & 1) &&
+               rf->t8030->gfx_pause_on_kick != 0 &&
+               ++rf->t8030->gfx_kick_count == rf->t8030->gfx_pause_on_kick) {
+        // Freeze the machine with this job in flight (no completion event)
+        // so its registers and memory can be inspected from the monitor.
+        stn_le_p(p, size, data);
+        qemu_log_mask(LOG_UNIMP, "sgx: pausing at vertex kick %u\n",
+                      rf->t8030->gfx_kick_count);
+        qemu_system_vmstop_request_prepare();
+        qemu_system_vmstop_request(RUN_STATE_PAUSED);
+        return;
+    } else if (rf->base + addr == SGX_TA_START && (data & 1) &&
                rf->t8030->gfx_null_render &&
                rf->t8030->gfx_asc_fw != NULL) {
         // No renderer yet: report the vertex job as finished straight away.
@@ -3549,6 +3560,7 @@ PROP_GETTER_SETTER(bool, gfx_null_render);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_3d);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_cp);
+PROP_VISIT_GETTER_SETTER(uint32, gfx_pause_on_kick);
 PROP_STR_GETTER_SETTER(ticket_filename);
 PROP_STR_GETTER_SETTER(sep_rom_filename);
 PROP_STR_GETTER_SETTER(sep_fw_filename);
@@ -3656,6 +3668,13 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
     object_class_property_set_description(
         klass, "gfx-null-event-cp",
         "Experiment: the same for a compute job");
+    object_class_property_add(klass, "gfx-pause-on-kick", "uint32",
+                              t8030_get_gfx_pause_on_kick,
+                              t8030_set_gfx_pause_on_kick, NULL, NULL);
+    object_class_property_set_description(
+        klass, "gfx-pause-on-kick",
+        "Debug: pause the machine at the Nth vertex job kick, leaving the "
+        "job in flight; 0 = off");
     object_class_property_add_bool(klass, "gfx-null-render",
                                    t8030_get_gfx_null_render,
                                    t8030_set_gfx_null_render);
