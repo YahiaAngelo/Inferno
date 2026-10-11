@@ -2321,6 +2321,8 @@ typedef struct {
 #define SGX_REQ_16860 (0x16860)
 #define SGX_TA_START (0x10100) // written with 1 after a vertex job is set up
 #define SGX_3D_START (0x10040) // same for a fragment job
+#define SGX_3D_STATUS (0x16038)
+#define SGX_3D_STATUS_COMPLETE BIT(0)
 #define SGX_ACK_16868 (0x16868)
 
 // GPU event interrupt, as the firmware's handler uses it: a 64-bit master
@@ -2429,6 +2431,12 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
                rf->t8030->gfx_null_render &&
                rf->t8030->gfx_asc_fw != NULL) {
         stn_le_p(p, size, data);
+        // After the fragment event the firmware tests bit 0 of this
+        // register: set means the render completed, clear means it was
+        // paused and its context must be saved for a later resume.
+        stq_le_p((uint8_t *)rf->t8030->gfx_reg_data[rf->idx] +
+                     (SGX_3D_STATUS - rf->base),
+                 SGX_3D_STATUS_COMPLETE);
         t8030_sgx_raise_events(rf, rf->t8030->gfx_null_event_3d);
         return;
     } else if (rf->base + addr == SGX_EVENT_CLEAR) {
@@ -3602,9 +3610,9 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
     oprop = object_class_property_add(klass, "gfx-null-event", "uint32",
                                       t8030_get_gfx_null_event,
                                       t8030_set_gfx_null_event, NULL, NULL);
-    // Master bit 3, slot 0: the firmware treats this as the vertex job
-    // finishing and goes on to start the fragment job.
-    object_property_set_default_uint(oprop, (SGX_EVENT_TA_GROUP0 << 8) | 1);
+    // Master bit 2, slot 0: vertex job done (its stamp is retired and the
+    // fragment job's barrier opens).
+    object_property_set_default_uint(oprop, (2 << 8) | 1);
     object_class_property_set_description(
         klass, "gfx-null-event",
         "Experiment: event reported for a vertex job with gfx-null-render, "
@@ -3613,7 +3621,7 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
                                       t8030_get_gfx_null_event_3d,
                                       t8030_set_gfx_null_event_3d, NULL,
                                       NULL);
-    object_property_set_default_uint(oprop, (2 << 8) | 1);
+    object_property_set_default_uint(oprop, (10 << 8) | 1);
     object_class_property_set_description(
         klass, "gfx-null-event-3d",
         "Experiment: the same for a fragment job");
