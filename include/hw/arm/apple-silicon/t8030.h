@@ -73,6 +73,10 @@ typedef struct {
     bool kaslr_off;
     bool gfx;
     uint32_t gfx_id_version;
+    bool gfx_null_render;
+    uint32_t gfx_null_event;
+    uint32_t gfx_null_event_3d;
+    SysBusDevice *gfx_asc_fw;
     MemoryRegion gfx_id;
     MemoryRegion gfx_regs[4];
     uint32_t *gfx_reg_data[4];

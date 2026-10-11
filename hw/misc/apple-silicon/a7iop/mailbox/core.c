@@ -407,6 +407,9 @@ void apple_a7iop_interrupt_status_push(AppleA7IOPMailbox *s, uint32_t status)
 {
     AppleA7IOPInterruptStatusMessage *msg;
 
+    if ((status & 0xf0000) == 0x10000) {
+        trace_apple_a7iop_mailbox_ext_interrupt(s->role, "raised", status);
+    }
 #if 1
     QTAILQ_FOREACH (msg, &s->interrupt_status, entry) {
         if (msg->status == status) {
@@ -478,6 +481,8 @@ uint32_t apple_a7iop_mailbox_read_interrupt_status(AppleA7IOPMailbox *s)
         if ((interrupt_status & 0xf0000) == 0x10000) {
             uint32_t interrupt = interrupt_status & 0x7F;
             int interrupt_group = interrupt / 32;
+            trace_apple_a7iop_mailbox_ext_interrupt(s->role, "taken",
+                                                    interrupt_status);
             // assert_cmpuint(interrupt_group, <, 4);
             a7iop_mbox->interrupts_enabled[interrupt_group] &=
                 ~(BIT(interrupt % 32));

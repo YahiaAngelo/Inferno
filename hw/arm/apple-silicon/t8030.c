@@ -746,6 +746,7 @@ static void t8030_memory_setup(AppleT8030MachineState *t8030)
             assert_nonnull(asc_reg);
             asc_dev = object_resolve_path_component(OBJECT(t8030), "gfx-asc");
             assert_nonnull(asc_dev);
+            t8030->gfx_asc_fw = SYS_BUS_DEVICE(asc_dev);
             apple_gfx_asc_fw_set_platform(
                 SYS_BUS_DEVICE(asc_dev),
                 t8030->armio_base + ((uint64_t *)asc_reg->data)[0], shared,
@@ -2313,9 +2314,80 @@ typedef struct {
 // command does (it looks like a context/TLB flush) is not known.
 #define SGX_CTX_CMD (0x16870)
 #define SGX_CTX_CMD2 (0x16878) // same protocol, sent before a job starts
+// Written with 1 after a vertex-side event (master bit 3) is taken; same
+// self-clearing protocol.
+#define SGX_TA_FINISH_CMD (0x14CE0)
 #define SGX_CTX_CMD_BUSY BIT(0)
 #define SGX_REQ_16860 (0x16860)
+#define SGX_TA_START (0x10100) // written with 1 after a vertex job is set up
+#define SGX_3D_START (0x10040) // same for a fragment job
 #define SGX_ACK_16868 (0x16868)
+
+// GPU event interrupt, as the firmware's handler uses it: a 64-bit master
+// status word; some of its bits have a 32-bit sub-status register (one bit per
+// job slot), and each status register is acknowledged by writing the bits
+// back to a clear register. The firmware takes this interrupt on line 0 of
+// its coprocessor interrupt controller.
+//   bit 2 -> +0x10a38, bit 3 -> +0x10a48, bit 4 -> +0x10a58, bit 5 -> +0x10a68,
+//   bit 10 -> +0x10a98, bit 11 -> +0x10aa8, bit 17 -> +0x10ac8
+// Bits 3..5 belong to the vertex side; which sub-status bit means what is
+// still being worked out.
+#define SGX_EVENT_STATUS (0x10A08)
+#define SGX_EVENT_CLEAR (0x10A10)
+#define SGX_EVENT_TA_GROUP0 (3)
+#define SGX_EVENT_TA_GROUP1 (4)
+#define SGX_EVENT_TA_GROUP2 (5)
+#define SGX_GFX_EVENT_IRQ (0)
+
+static hwaddr t8030_sgx_event_sub_status(unsigned bit)
+{
+    switch (bit) {
+    case 2 ... 5:
+        return 0x10A38 + (bit - 2) * 0x10;
+    case 10:
+        return 0x10A98;
+    case 11:
+        return 0x10AA8;
+    case 17:
+        return 0x10AC8;
+    default:
+        return 0;
+    }
+}
+
+static bool t8030_sgx_is_event_sub_clear(hwaddr addr)
+{
+    static const unsigned bits[] = { 2, 3, 4, 5, 10, 11, 17 };
+
+    for (size_t i = 0; i < ARRAY_SIZE(bits); i++) {
+        if (addr == t8030_sgx_event_sub_status(bits[i]) + 8) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void t8030_sgx_raise_event(T8030GfxRegFile *rf, unsigned bit,
+                                  uint32_t sub)
+{
+    uint8_t *regs = (uint8_t *)rf->t8030->gfx_reg_data[rf->idx] - rf->base;
+    hwaddr sub_addr = t8030_sgx_event_sub_status(bit);
+
+    if (sub_addr != 0) {
+        stl_le_p(regs + sub_addr, ldl_le_p(regs + sub_addr) | sub);
+    }
+    stq_le_p(regs + SGX_EVENT_STATUS,
+             ldq_le_p(regs + SGX_EVENT_STATUS) | BIT_ULL(bit));
+    apple_gfx_asc_fw_raise_irq(rf->t8030->gfx_asc_fw, SGX_GFX_EVENT_IRQ);
+}
+
+// Up to two events packed as 16-bit (master bit << 8) | sub-status fields.
+static void t8030_sgx_raise_events(T8030GfxRegFile *rf, uint32_t events)
+{
+    for (; events != 0; events >>= 16) {
+        t8030_sgx_raise_event(rf, (events >> 8) & 0xFF, events & 0xFF);
+    }
+}
 
 static uint64_t t8030_sgx_regs_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -2343,8 +2415,35 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
     if (rf->base + addr == SGX_PWR_STATE) {
         data &= ~(uint64_t)SGX_PWR_STATE_BUSY;
     } else if (rf->base + addr == SGX_CTX_CMD ||
-               rf->base + addr == SGX_CTX_CMD2) {
+               rf->base + addr == SGX_CTX_CMD2 ||
+               rf->base + addr == SGX_TA_FINISH_CMD) {
         data &= ~(uint64_t)SGX_CTX_CMD_BUSY;
+    } else if (rf->base + addr == SGX_TA_START && (data & 1) &&
+               rf->t8030->gfx_null_render &&
+               rf->t8030->gfx_asc_fw != NULL) {
+        // No renderer yet: report the vertex job as finished straight away.
+        stn_le_p(p, size, data);
+        t8030_sgx_raise_events(rf, rf->t8030->gfx_null_event);
+        return;
+    } else if (rf->base + addr == SGX_3D_START && (data & 1) &&
+               rf->t8030->gfx_null_render &&
+               rf->t8030->gfx_asc_fw != NULL) {
+        stn_le_p(p, size, data);
+        t8030_sgx_raise_events(rf, rf->t8030->gfx_null_event_3d);
+        return;
+    } else if (rf->base + addr == SGX_EVENT_CLEAR) {
+        // Write-one-to-clear for the master status word.
+        uint8_t *st = (uint8_t *)rf->t8030->gfx_reg_data[rf->idx] +
+                      (SGX_EVENT_STATUS - rf->base);
+
+        stq_le_p(st, ldq_le_p(st) & ~data);
+        return;
+    } else if (t8030_sgx_is_event_sub_clear(rf->base + addr)) {
+        // Each sub-status register has its clear register 8 bytes above.
+        uint8_t *st = p - 8;
+
+        stq_le_p(st, ldq_le_p(st) & ~data);
+        return;
     } else if (rf->base + addr == SGX_REQ_16860) {
         // Request/acknowledge pair: the firmware writes the request and
         // polls the next register until it follows. Purpose unknown.
@@ -3417,6 +3516,9 @@ PROP_GETTER_SETTER(bool, force_dfu);
 PROP_GETTER_SETTER(int, usb_conn_type);
 PROP_STR_GETTER_SETTER(trustcache_filename);
 PROP_STR_GETTER_SETTER(gfx_fw_filename);
+PROP_GETTER_SETTER(bool, gfx_null_render);
+PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event);
+PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_3d);
 PROP_STR_GETTER_SETTER(ticket_filename);
 PROP_STR_GETTER_SETTER(sep_rom_filename);
 PROP_STR_GETTER_SETTER(sep_fw_filename);
@@ -3497,6 +3599,31 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
     object_class_property_set_description(
         klass, "gfx-id-version",
         "GPU ID version register (0x03000000 = G12P A0, 0x03001000 = B0)");
+    oprop = object_class_property_add(klass, "gfx-null-event", "uint32",
+                                      t8030_get_gfx_null_event,
+                                      t8030_set_gfx_null_event, NULL, NULL);
+    // Master bit 3, slot 0: the firmware treats this as the vertex job
+    // finishing and goes on to start the fragment job.
+    object_property_set_default_uint(oprop, (SGX_EVENT_TA_GROUP0 << 8) | 1);
+    object_class_property_set_description(
+        klass, "gfx-null-event",
+        "Experiment: event reported for a vertex job with gfx-null-render, "
+        "as (master status bit << 8) | sub-status mask");
+    oprop = object_class_property_add(klass, "gfx-null-event-3d", "uint32",
+                                      t8030_get_gfx_null_event_3d,
+                                      t8030_set_gfx_null_event_3d, NULL,
+                                      NULL);
+    object_property_set_default_uint(oprop, (2 << 8) | 1);
+    object_class_property_set_description(
+        klass, "gfx-null-event-3d",
+        "Experiment: the same for a fragment job");
+    object_class_property_add_bool(klass, "gfx-null-render",
+                                   t8030_get_gfx_null_render,
+                                   t8030_set_gfx_null_render);
+    object_class_property_set_description(
+        klass, "gfx-null-render",
+        "Experiment: report GPU jobs as finished as soon as the firmware "
+        "starts them, without rendering anything");
     object_class_property_add_bool(klass, "force-dfu", t8030_get_force_dfu,
                                    t8030_set_force_dfu);
     object_class_property_set_description(klass, "force-dfu", "Force DFU");

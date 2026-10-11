@@ -253,6 +253,10 @@ static void apple_gfx_asc_fw_start(AppleA7IOP *a7iop)
 
     object_property_set_uint(OBJECT(s->cpu), "rvbar", s->load_addr,
                              &error_abort);
+    // The mailbox model only treats timer and external interrupts as
+    // deliverable once this is set (the SEP sets it through one of its own
+    // registers); the GPU firmware needs both from the start.
+    s->parent_obj.iop_mailbox->sepd_enabled = 1;
     apple_a13_set_on(APPLE_A13(s->cpu));
     async_run_on_cpu(CPU(s->cpu), apple_gfx_asc_fw_cpu_init_work,
                      RUN_ON_CPU_NULL);
@@ -354,6 +358,16 @@ static void apple_gfx_asc_fw_register_types(void)
 }
 
 type_init(apple_gfx_asc_fw_register_types);
+
+void apple_gfx_asc_fw_raise_irq(SysBusDevice *sbd, uint32_t irq)
+{
+    AppleGFXASCFWState *s = APPLE_GFX_ASC_FW(sbd);
+
+    // External interrupts are queued as 0x10000 | number, see the mailbox's
+    // is_interrupt_enabled().
+    apple_a7iop_interrupt_status_push(s->parent_obj.iop_mailbox,
+                                      0x10000 | irq);
+}
 
 void apple_gfx_asc_fw_set_platform(SysBusDevice *sbd, hwaddr wrapper_base,
                                    hwaddr page_table_base,
