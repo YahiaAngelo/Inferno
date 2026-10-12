@@ -2729,6 +2729,7 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
                rf->t8030->gfx_asc_fw != NULL) {
         stn_le_p(p, size, data);
         if (rf->idx == 0 && rf->t8030->gfx_capture_dir != NULL &&
+            rf->t8030->gfx_capture_cp_seen++ >= rf->t8030->gfx_capture_cp_skip &&
             rf->t8030->gfx_capture_cp_count < rf->t8030->gfx_capture_cp) {
             t8030_sgx_capture(rf, "cp", ++rf->t8030->gfx_capture_cp_count);
         }
@@ -3861,6 +3862,7 @@ PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_max);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_skip);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_burst);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_cp);
+PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_cp_skip);
 PROP_VISIT_GETTER_SETTER(uint64, gfx_capture_size);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_skip2);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event);
@@ -4039,6 +4041,12 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
     object_class_property_set_description(
         klass, "gfx-capture-size-skip",
         "Skip this many jobs matching gfx-capture-size first");
+    object_class_property_add(klass, "gfx-capture-cp-skip", "uint32",
+                              t8030_get_gfx_capture_cp_skip,
+                              t8030_set_gfx_capture_cp_skip, NULL, NULL);
+    object_class_property_set_description(
+        klass, "gfx-capture-cp-skip",
+        "Skip this many compute jobs before gfx-capture-cp starts counting");
     object_class_property_add(klass, "gfx-capture-max", "uint32",
                               t8030_get_gfx_capture_max,
                               t8030_set_gfx_capture_max, NULL, NULL);
