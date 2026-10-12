@@ -2511,6 +2511,16 @@ static void t8030_sgx_capture_kick(T8030GfxRegFile *rf, bool fragment)
         AppleT8030MachineState *t8030 = rf->t8030;
 
         if (fragment) {
+            // Capturing on demand: creating the file "go" in the capture
+            // directory captures the next gfx-capture-max jobs.
+            g_autofree char *go =
+                g_build_filename(t8030->gfx_capture_dir, "go", NULL);
+
+            if (g_file_test(go, G_FILE_TEST_EXISTS)) {
+                unlink(go);
+                t8030->gfx_capture_skip = 0;
+                t8030->gfx_capture_max += t8030->gfx_capture_burst;
+            }
             if (t8030->gfx_capture_seen++ >= t8030->gfx_capture_skip &&
                 (t8030->gfx_capture_max == 0 ||
                  t8030->gfx_capture_count < t8030->gfx_capture_max)) {
@@ -3800,6 +3810,7 @@ PROP_GETTER_SETTER(bool, gfx_render);
 PROP_GETTER_SETTER(bool, gfx_render_sync);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_max);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_skip);
+PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_burst);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_3d);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_cp);
@@ -3944,6 +3955,13 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
     object_class_property_set_description(
         klass, "gfx-capture-skip",
         "Do not capture the first this many fragment jobs");
+    object_class_property_add(klass, "gfx-capture-burst", "uint32",
+                              t8030_get_gfx_capture_burst,
+                              t8030_set_gfx_capture_burst, NULL, NULL);
+    object_class_property_set_description(
+        klass, "gfx-capture-burst",
+        "Capture this many more fragment jobs each time a file named go "
+        "appears in the capture directory");
     object_class_property_add(klass, "gfx-capture-max", "uint32",
                               t8030_get_gfx_capture_max,
                               t8030_set_gfx_capture_max, NULL, NULL);
