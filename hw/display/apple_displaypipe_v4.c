@@ -986,21 +986,26 @@ type_init(adp_v4_register_types);
 
 // TODO: handle source/dest position, etc.
 static void adp_v4_gp_draw(ADPV4GenPipe *genpipe, AddressSpace *dma_as,
-                           pixman_image_t *disp_image, QemuConsole *console)
+                           pixman_image_t *disp_image, QemuConsole *console,
+                           pixman_op_t op)
 {
     pixman_format_code_t fmt;
     pixman_image_t *image;
 
-    if (REG_FIELD_EX32(genpipe->state.config_control, GP_CONFIG_CONTROL, RUN) ==
-            0 ||
-        REG_FIELD_EX32(genpipe->state.config_control, GP_CONFIG_CONTROL,
+    if (REG_FIELD_EX32(genpipe->state.config_control, GP_CONFIG_CONTROL,
                        ENABLED) == 0) {
         return;
     }
 
-    qemu_mutex_lock(&genpipe->lock);
-    adp_v4_gp_read(genpipe, dma_as);
-    qemu_mutex_unlock(&genpipe->lock);
+    // An enabled pipe whose RUN bit is clear has nothing new this frame (the
+    // guest does that for the plane that did not change when it shows two):
+    // it keeps showing the frame it fetched last.
+    if (REG_FIELD_EX32(genpipe->state.config_control, GP_CONFIG_CONTROL, RUN) !=
+        0) {
+        qemu_mutex_lock(&genpipe->lock);
+        adp_v4_gp_read(genpipe, dma_as);
+        qemu_mutex_unlock(&genpipe->lock);
+    }
 
     if (genpipe->state.buf_len != 0) {
         image = genpipe->state.image;
@@ -1011,8 +1016,8 @@ static void adp_v4_gp_draw(ADPV4GenPipe *genpipe, AddressSpace *dma_as,
                 (uint32_t *)genpipe->state.buf, genpipe->state.stride);
         }
 
-        pixman_image_composite(PIXMAN_OP_SRC, image, NULL, disp_image, 0, 0, 0,
-                               0, 0, 0, genpipe->state.dest_width,
+        pixman_image_composite(op, image, NULL, disp_image, 0, 0, 0, 0, 0, 0,
+                               genpipe->state.dest_width,
                                genpipe->state.dest_height);
 
         dpy_gfx_update(console, 0, 0, genpipe->state.dest_width,
@@ -1027,8 +1032,46 @@ static void adp_v4_update_disp_bh(void *opaque)
 
     disp_image = qemu_console_surface(adp->console)->image;
 
-    adp_v4_gp_draw(&adp->genpipe[0], &adp->dma_as, disp_image, adp->console);
-    adp_v4_gp_draw(&adp->genpipe[1], &adp->dma_as, disp_image, adp->console);
+    // The blend unit stacks its layers bottom-up; each names the pipe that
+    // feeds it. The bottom layer replaces the frame, the ones above are
+    // blended over it by their (premultiplied) alpha.
+    {
+        static uint32_t last[4];
+        uint32_t now[4] = { adp->blend_unit.layer_config[0],
+                            adp->blend_unit.layer_config[1],
+                            adp->genpipe[0].state.config_control,
+                            adp->genpipe[1].state.config_control };
+        bool first = true;
+
+        if (memcmp(last, now, sizeof(now)) != 0) {
+            memcpy(last, now, sizeof(now));
+            qemu_log_mask(LOG_UNIMP,
+                          "adp: blend layers 0x%x 0x%x, gp0 control 0x%x "
+                          "format 0x%x, gp1 control 0x%x format 0x%x\n",
+                          now[0], now[1], now[2],
+                          adp->genpipe[0].state.pixel_format, now[3],
+                          adp->genpipe[1].state.pixel_format);
+        }
+        for (unsigned layer = 0; layer < 2; layer++) {
+            uint32_t cfg = adp->blend_unit.layer_config[layer];
+            unsigned pipe = BLEND_LAYER_CONFIG_PIPE(cfg);
+
+            if (BLEND_LAYER_CONFIG_MODE(cfg) == BLEND_MODE_NONE || pipe > 1) {
+                continue;
+            }
+            adp_v4_gp_draw(&adp->genpipe[pipe], &adp->dma_as, disp_image,
+                           adp->console,
+                           first ? PIXMAN_OP_SRC : PIXMAN_OP_OVER);
+            first = false;
+        }
+        if (first) {
+            // no layer configured: as before, both pipes in order
+            adp_v4_gp_draw(&adp->genpipe[0], &adp->dma_as, disp_image,
+                           adp->console, PIXMAN_OP_SRC);
+            adp_v4_gp_draw(&adp->genpipe[1], &adp->dma_as, disp_image,
+                           adp->console, PIXMAN_OP_SRC);
+        }
+    }
     qatomic_inc(&adp->stat_frames);
 
     qatomic_or(&adp->int_status, R_CONTROL_INT_FRAME_PROCESSED_MASK);
