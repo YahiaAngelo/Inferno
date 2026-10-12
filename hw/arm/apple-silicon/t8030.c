@@ -2522,6 +2522,15 @@ static void t8030_sgx_capture_kick(T8030GfxRegFile *rf, bool fragment)
                 t8030->gfx_capture_skip = 0;
                 t8030->gfx_capture_max += t8030->gfx_capture_burst;
             }
+            // gfx-capture-size picks out jobs of one size (height << 32 |
+            // width, the fragment size register), up to gfx-capture-burst.
+            if (t8030->gfx_capture_size != 0 &&
+                ldq_le_p((uint8_t *)t8030->gfx_reg_data[0] + 0x15210) ==
+                    t8030->gfx_capture_size &&
+                t8030->gfx_capture_size_count < t8030->gfx_capture_burst) {
+                t8030->gfx_capture_size_count++;
+                t8030_sgx_capture(rf, "3d", ++t8030->gfx_capture_count);
+            } else
             if (t8030->gfx_capture_seen++ >= t8030->gfx_capture_skip &&
                 (t8030->gfx_capture_max == 0 ||
                  t8030->gfx_capture_count < t8030->gfx_capture_max)) {
@@ -3831,6 +3840,7 @@ PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_max);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_skip);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_burst);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_cp);
+PROP_VISIT_GETTER_SETTER(uint64, gfx_capture_size);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_3d);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_cp);
@@ -3988,6 +3998,13 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
     object_class_property_set_description(
         klass, "gfx-capture-cp",
         "Capture the first this many compute jobs as well (cp-N)");
+    object_class_property_add(klass, "gfx-capture-size", "uint64",
+                              t8030_get_gfx_capture_size,
+                              t8030_set_gfx_capture_size, NULL, NULL);
+    object_class_property_set_description(
+        klass, "gfx-capture-size",
+        "Capture fragment jobs of this size (height << 32 | width), up to "
+        "gfx-capture-burst of them");
     object_class_property_add(klass, "gfx-capture-max", "uint32",
                               t8030_get_gfx_capture_max,
                               t8030_set_gfx_capture_max, NULL, NULL);
