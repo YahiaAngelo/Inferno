@@ -2497,7 +2497,11 @@ static void t8030_sgx_capture_kick(T8030GfxRegFile *rf, bool fragment)
         AppleT8030MachineState *t8030 = rf->t8030;
 
         if (fragment) {
-            t8030_sgx_capture(rf);
+            if (t8030->gfx_capture_seen++ >= t8030->gfx_capture_skip &&
+                (t8030->gfx_capture_max == 0 ||
+                 t8030->gfx_capture_count < t8030->gfx_capture_max)) {
+                t8030_sgx_capture(rf);
+            }
         } else {
             unsigned i = t8030->gfx_capture_ta_next++ %
                          ARRAY_SIZE(t8030->gfx_capture_ta);
@@ -3780,6 +3784,8 @@ PROP_STR_GETTER_SETTER(gfx_capture_dir);
 PROP_GETTER_SETTER(bool, gfx_null_render);
 PROP_GETTER_SETTER(bool, gfx_render);
 PROP_GETTER_SETTER(bool, gfx_render_sync);
+PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_max);
+PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_skip);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_3d);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_cp);
@@ -3918,6 +3924,18 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
         klass, "gfx-render",
         "Render GPU jobs with the agxemu library before reporting them "
         "finished (needs gfx-null-render=on and a build with -Dagxemu=...)");
+    object_class_property_add(klass, "gfx-capture-skip", "uint32",
+                              t8030_get_gfx_capture_skip,
+                              t8030_set_gfx_capture_skip, NULL, NULL);
+    object_class_property_set_description(
+        klass, "gfx-capture-skip",
+        "Do not capture the first this many fragment jobs");
+    object_class_property_add(klass, "gfx-capture-max", "uint32",
+                              t8030_get_gfx_capture_max,
+                              t8030_set_gfx_capture_max, NULL, NULL);
+    object_class_property_set_description(
+        klass, "gfx-capture-max",
+        "Stop capturing after this many fragment jobs; 0 = no limit");
     object_class_property_add_bool(klass, "gfx-render-sync",
                                    t8030_get_gfx_render_sync,
                                    t8030_set_gfx_render_sync);

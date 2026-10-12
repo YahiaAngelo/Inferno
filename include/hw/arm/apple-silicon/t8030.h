@@ -86,6 +86,9 @@ typedef struct {
     uint64_t gfx_progress_count;
     char *gfx_capture_dir;
     uint32_t gfx_capture_count;
+    uint32_t gfx_capture_max;
+    uint32_t gfx_capture_skip;
+    uint32_t gfx_capture_seen;
     uint8_t *gfx_capture_ta[8];
     uint32_t gfx_capture_ta_next;
     hwaddr gfx_ttbat;

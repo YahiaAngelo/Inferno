@@ -328,12 +328,19 @@ static void adp_v4_gp_read(ADPV4GenPipe *genpipe, AddressSpace *dma_as)
 
     genpipe->state.buf_len = 0;
 
-    // TODO: Decompress the data and display it properly.
+    // Compressed surfaces only ever travel between the GPU and the display
+    // pipe. The emulated GPU (agxemu) does not compress: it writes such a
+    // target as plain rows of width * 4 bytes at the surface's address, so
+    // that is how a compressed frame is read here.
     if (genpipe->state.pixel_format & GP_PIXEL_FORMAT_COMPRESSED) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "gp%d: dropping frame as it's compressed.\n",
-                      genpipe->index);
-        return;
+        qemu_log_mask(LOG_UNIMP,
+                      "gp%d: compressed frame: format 0x%x start 0x%x end 0x%x "
+                      "stride %u, %ux%u\n",
+                      genpipe->index, genpipe->state.pixel_format,
+                      genpipe->state.data_start, genpipe->state.data_end,
+                      genpipe->state.stride, genpipe->state.src_width,
+                      genpipe->state.src_height);
+        genpipe->state.stride = genpipe->state.src_width * 4;
     }
 
     ADP_INFO("gp%d: width and height is %dx%d.", genpipe->index,
