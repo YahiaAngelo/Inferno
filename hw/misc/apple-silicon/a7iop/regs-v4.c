@@ -119,6 +119,12 @@ static void apple_a7iop_v4_reg_write(void *opaque, hwaddr addr,
     case REG_KIC_TMR0_EN:
         WITH_QEMU_LOCK_GUARD(&s->iop_mailbox->lock)
         {
+            if (s->iop_mailbox->timer0_enabled != data &&
+                !strcmp(s->iop_mailbox->role, "GFX-iop")) {
+                qemu_log_mask(LOG_UNIMP,
+                              "GFX-iop: timer 0 enable 0x%x -> 0x%" PRIx64 "\n",
+                              s->iop_mailbox->timer0_enabled, (uint64_t)data);
+            }
             s->iop_mailbox->timer0_enabled = data;
             apple_a7iop_mailbox_update_irq(s->iop_mailbox);
         }
@@ -126,6 +132,12 @@ static void apple_a7iop_v4_reg_write(void *opaque, hwaddr addr,
     case REG_KIC_TMR1_EN:
         WITH_QEMU_LOCK_GUARD(&s->iop_mailbox->lock)
         {
+            if (s->iop_mailbox->timer1_enabled != data &&
+                !strcmp(s->iop_mailbox->role, "GFX-iop")) {
+                qemu_log_mask(LOG_UNIMP,
+                              "GFX-iop: timer 1 enable 0x%x -> 0x%" PRIx64 "\n",
+                              s->iop_mailbox->timer1_enabled, (uint64_t)data);
+            }
             s->iop_mailbox->timer1_enabled = data;
             apple_a7iop_mailbox_update_irq(s->iop_mailbox);
         }
