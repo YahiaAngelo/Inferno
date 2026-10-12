@@ -26,4 +26,6 @@
 OBJECT_DECLARE_SIMPLE_TYPE(AppleMTSPIState, APPLE_MT_SPI)
 
 #define APPLE_MT_SPI_IRQ "mt-irq"
+
+void apple_mt_spi_tap(AppleMTSPIState *s, int x, int y, unsigned hold_ms);
 #endif /* HW_ARM_APPLE_SILICON_MT_SPI_H */

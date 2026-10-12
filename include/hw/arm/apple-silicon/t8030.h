@@ -81,6 +81,7 @@ typedef struct {
     uint32_t gfx_pause_on_kick;
     uint32_t gfx_kick_count;
     uint32_t gfx_pause_on_3d;
+    DeviceState *touch;
     bool gfx_render;
     bool gfx_render_sync;
     uint64_t gfx_progress_count;

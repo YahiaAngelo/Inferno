@@ -89,6 +89,8 @@ struct AppleMTSPIState {
     uint8_t frame;
     QEMUTimer *timer;
     QEMUTimer *end_timer;
+    QEMUTimer *tap_timer;
+    int tap_x, tap_y;
     int16_t x;
     int16_t y;
     int16_t prev_x;
@@ -711,6 +713,11 @@ static void apple_mt_spi_handle_fw_packet(AppleMTSPIState *s)
         } else {
             packet = QTAILQ_FIRST(&s->pending_fw);
             assert_nonnull(packet);
+            if (getenv("MT_SPI_DEBUG")) {
+                fprintf(stderr, "mt-spi: guest fetches a packet (type %u, %u bytes) at %" PRId64 " ms\n",
+                        packet->type, (unsigned)packet->buf.len,
+                        qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
+            }
             apple_mt_spi_push_ll_hdr(&buf, packet->type, 0, 0, 0,
                                      packet->buf.len);
             apple_mt_spi_buf_append(&buf, &packet->buf);
@@ -821,6 +828,10 @@ static void apple_mt_spi_send_path_update(AppleMTSPIState *s, uint64_t ts,
     int32_t y_delta;
 
     packet = g_new0(AppleMTSPILLPacket, 1);
+    if (getenv("MT_SPI_DEBUG")) {
+        fprintf(stderr, "mt-spi: queue stage %u at %" PRId64 " ms (event at %" PRIu64 " ms)\n",
+                path_stage, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL), ts / SCALE_MS);
+    }
 
     ts_delta = ts - s->prev_ts;
     ts_delta = MAX(ts_delta, 1); // Prevent div-by-zero
@@ -1006,6 +1017,32 @@ static void apple_mt_spi_mouse_event(void *opaque, int dx, int dy, int dz,
                                     NANOSECONDS_PER_SECOND / 10);
     }
 }
+static void apple_mt_spi_tap_release(void *opaque)
+{
+    AppleMTSPIState *s = opaque;
+
+    apple_mt_spi_mouse_event(s, s->tap_x, s->tap_y, 0, 0);
+}
+
+// Touches the screen at (x, y), in the 0..0x7fff units of absolute pointer
+// events, and lifts the finger again hold_ms of guest time later. Going
+// through the monitor's pointer events instead leaves the length of a press
+// at the mercy of how quickly two monitor commands get served, which under
+// load turns taps into long presses.
+void apple_mt_spi_tap(AppleMTSPIState *s, int x, int y, unsigned hold_ms)
+{
+    if (s->tap_timer == NULL) {
+        s->tap_timer =
+            timer_new_ms(QEMU_CLOCK_VIRTUAL, apple_mt_spi_tap_release, s);
+    }
+    s->tap_x = x;
+    s->tap_y = y;
+    apple_mt_spi_mouse_event(s, x, y, 0, 0);
+    apple_mt_spi_mouse_event(s, x, y, 0, MOUSE_EVENT_LBUTTON);
+    timer_mod(s->tap_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + hold_ms);
+}
+
 static void apple_mt_spi_realize(SSIPeripheral *dev, Error **errp)
 {
     AppleMTSPIState *s;

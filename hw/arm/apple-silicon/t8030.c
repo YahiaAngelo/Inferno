@@ -3133,6 +3133,7 @@ static void t8030_create_mt_spi(AppleT8030MachineState *t8030)
     qdev_prop_set_uint32(device, "display_width", t8030->disp_width);
     qdev_prop_set_uint32(device, "display_height", t8030->disp_height);
     ssi_realize_and_unref(device, apple_spi_get_bus(spi), &error_fatal);
+    t8030->touch = device;
 
     gpio = DEVICE(
         object_property_get_link(OBJECT(t8030), "aop-gpio", &error_fatal));
@@ -3833,6 +3834,24 @@ PROP_VISIT_GETTER_SETTER(uint32, gfx_id_version);
 PROP_GETTER_SETTER(bool, force_dfu);
 PROP_GETTER_SETTER(int, usb_conn_type);
 PROP_STR_GETTER_SETTER(trustcache_filename);
+static char *t8030_get_touch_tap(Object *obj, Error **errp)
+{
+    return g_strdup("");
+}
+
+static void t8030_set_touch_tap(Object *obj, const char *value, Error **errp)
+{
+    AppleT8030MachineState *t8030 = APPLE_T8030(obj);
+    int x, y;
+    unsigned ms = 80;
+
+    if (t8030->touch == NULL || sscanf(value, "%d %d %u", &x, &y, &ms) < 2) {
+        error_setg(errp, "touch-tap: expected \"x y [ms]\" on a running machine");
+        return;
+    }
+    apple_mt_spi_tap(APPLE_MT_SPI(t8030->touch), x, y, ms);
+}
+
 PROP_STR_GETTER_SETTER(gfx_fw_filename);
 PROP_STR_GETTER_SETTER(gfx_capture_dir);
 PROP_GETTER_SETTER(bool, gfx_null_render);
@@ -3916,6 +3935,12 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
         klass, "gfx",
         "Expose the GPU (sgx) and its coprocessor (gfx-asc) to the guest. "
         "Experimental: both are register-logging stubs (-d unimp)");
+    object_class_property_add_str(klass, "touch-tap", t8030_get_touch_tap,
+                                  t8030_set_touch_tap);
+    object_class_property_set_description(
+        klass, "touch-tap",
+        "Set at run time (qom-set) to \"x y ms\": tap the screen at x, y "
+        "(0..32767 each) for ms milliseconds of guest time");
     object_class_property_add_str(klass, "gfx-fw", t8030_get_gfx_fw_filename,
                                   t8030_set_gfx_fw_filename);
     object_class_property_add_str(klass, "gfx-capture",
