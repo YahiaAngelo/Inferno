@@ -799,6 +799,13 @@ static uint32_t apple_mt_spi_transfer(SSIPeripheral *dev, uint32_t val)
         QTAILQ_EMPTY(&s->pending_fw)) {
         qemu_irq_raise(s->irq);
     } else {
+        // More to fetch. The guest takes one packet per falling edge, so
+        // when the one it was reading is finished, make a new edge for the
+        // next: a line simply left active delivers the rest (such as the
+        // end of a touch) only when some later event toggles it.
+        if (apple_mt_spi_buf_is_empty(&s->tx)) {
+            qemu_irq_raise(s->irq);
+        }
         qemu_irq_lower(s->irq);
     }
 
