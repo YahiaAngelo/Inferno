@@ -89,6 +89,8 @@ typedef struct {
     uint32_t gfx_capture_max;
     uint32_t gfx_capture_skip;
     uint32_t gfx_capture_burst;
+    uint32_t gfx_capture_cp;
+    uint32_t gfx_capture_cp_count;
     uint32_t gfx_capture_seen;
     uint8_t *gfx_capture_ta[8];
     uint32_t gfx_capture_ta_next;

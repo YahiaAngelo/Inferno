@@ -2453,12 +2453,13 @@ static AgxEmu *t8030_agxemu(T8030GfxRegFile *rf)
 
 // Writes guest RAM (sparse) and the GPU register block to
 // <gfx-capture>/3d-<n>/ so the job can be replayed outside the emulator.
-static void t8030_sgx_capture(T8030GfxRegFile *rf)
+static void t8030_sgx_capture(T8030GfxRegFile *rf, const char *kind,
+                              unsigned number)
 {
     AppleT8030MachineState *t8030 = rf->t8030;
     MachineState *machine = MACHINE(t8030);
-    g_autofree char *dir = g_strdup_printf("%s/3d-%u", t8030->gfx_capture_dir,
-                                           ++t8030->gfx_capture_count);
+    g_autofree char *dir = g_strdup_printf("%s/%s-%u", t8030->gfx_capture_dir,
+                                           kind, number);
     g_autofree char *ram_path = g_build_filename(dir, "ram.bin", NULL);
     g_autofree char *regs_path = g_build_filename(dir, "regs.bin", NULL);
     const size_t chunk = 1 * MiB;
@@ -2524,7 +2525,7 @@ static void t8030_sgx_capture_kick(T8030GfxRegFile *rf, bool fragment)
             if (t8030->gfx_capture_seen++ >= t8030->gfx_capture_skip &&
                 (t8030->gfx_capture_max == 0 ||
                  t8030->gfx_capture_count < t8030->gfx_capture_max)) {
-                t8030_sgx_capture(rf);
+                t8030_sgx_capture(rf, "3d", ++t8030->gfx_capture_count);
             }
         } else {
             unsigned i = t8030->gfx_capture_ta_next++ %
@@ -2716,6 +2717,24 @@ static void t8030_sgx_regs_write(void *opaque, hwaddr addr, uint64_t data,
                rf->t8030->gfx_null_render &&
                rf->t8030->gfx_asc_fw != NULL) {
         stn_le_p(p, size, data);
+        if (rf->idx == 0 && rf->t8030->gfx_capture_dir != NULL &&
+            rf->t8030->gfx_capture_cp_count < rf->t8030->gfx_capture_cp) {
+            t8030_sgx_capture(rf, "cp", ++rf->t8030->gfx_capture_cp_count);
+        }
+#ifdef CONFIG_AGXEMU
+        if (rf->t8030->gfx_render && rf->idx == 0) {
+            bool unlock = rf->t8030->gfx_capture_dir == NULL &&
+                          !rf->t8030->gfx_render_sync && bql_locked();
+
+            if (unlock) {
+                bql_unlock();
+            }
+            agxemu_compute_job(t8030_agxemu(rf));
+            if (unlock) {
+                bql_lock();
+            }
+        }
+#endif
         t8030_sgx_raise_events(rf, rf->t8030->gfx_null_event_cp,
                                SGX_CP_SLOT);
         return;
@@ -3811,6 +3830,7 @@ PROP_GETTER_SETTER(bool, gfx_render_sync);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_max);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_skip);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_burst);
+PROP_VISIT_GETTER_SETTER(uint32, gfx_capture_cp);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_3d);
 PROP_VISIT_GETTER_SETTER(uint32, gfx_null_event_cp);
@@ -3962,6 +3982,12 @@ static void t8030_class_init(ObjectClass *klass, const void *data)
         klass, "gfx-capture-burst",
         "Capture this many more fragment jobs each time a file named go "
         "appears in the capture directory");
+    object_class_property_add(klass, "gfx-capture-cp", "uint32",
+                              t8030_get_gfx_capture_cp,
+                              t8030_set_gfx_capture_cp, NULL, NULL);
+    object_class_property_set_description(
+        klass, "gfx-capture-cp",
+        "Capture the first this many compute jobs as well (cp-N)");
     object_class_property_add(klass, "gfx-capture-max", "uint32",
                               t8030_get_gfx_capture_max,
                               t8030_set_gfx_capture_max, NULL, NULL);
