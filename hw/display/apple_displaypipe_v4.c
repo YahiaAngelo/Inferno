@@ -104,6 +104,9 @@ typedef struct {
     uint16_t src_height;
     void *buf;
     uint32_t buf_len;
+    /// Row length of what is in buf (differs from the stride register for
+    /// compressed frames).
+    uint32_t buf_stride;
     uint32_t buf_capacity;
     /// Cached image, to not remake it every single run.
     pixman_image_t *image;
@@ -324,7 +327,7 @@ static pixman_format_code_t adp_v4_gp_fmt_to_pixman(ADPV4GenPipe *genpipe)
 
 static void adp_v4_gp_read(ADPV4GenPipe *genpipe, AddressSpace *dma_as)
 {
-    uint32_t len;
+    uint32_t len, stride;
 
     genpipe->state.buf_len = 0;
 
@@ -340,15 +343,24 @@ static void adp_v4_gp_read(ADPV4GenPipe *genpipe, AddressSpace *dma_as)
                       genpipe->state.data_start, genpipe->state.data_end,
                       genpipe->state.stride, genpipe->state.src_width,
                       genpipe->state.src_height);
-        genpipe->state.stride = genpipe->state.src_width * 4;
+    }
+    stride = (genpipe->state.pixel_format & GP_PIXEL_FORMAT_COMPRESSED) ?
+                 genpipe->state.src_width * 4u : genpipe->state.stride;
+    if (stride != genpipe->state.buf_stride) {
+        qemu_pixman_image_unref(genpipe->state.image);
+        genpipe->state.image = NULL;
+        genpipe->state.buf_stride = stride;
     }
 
     ADP_INFO("gp%d: width and height is %dx%d.", genpipe->index,
              genpipe->state.src_width, genpipe->state.src_height);
     ADP_INFO("gp%d: stride is %d.", genpipe->index, genpipe->state.stride);
 
-    len = genpipe->state.src_height * genpipe->state.stride;
+    len = genpipe->state.src_height * stride;
     if (genpipe->state.buf_capacity < len) {
+        // the cached image points into the old buffer
+        qemu_pixman_image_unref(genpipe->state.image);
+        genpipe->state.image = NULL;
         g_free(genpipe->state.buf);
         genpipe->state.buf = g_malloc(len);
         genpipe->state.buf_capacity = len;
@@ -357,6 +369,18 @@ static void adp_v4_gp_read(ADPV4GenPipe *genpipe, AddressSpace *dma_as)
     if (dma_memory_read(dma_as, genpipe->state.data_start, genpipe->state.buf,
                         len, MEMTXATTRS_UNSPECIFIED) == MEMTX_OK) {
         genpipe->state.buf_len = len;
+        if (getenv("ADP_DUMP") != NULL) {
+            // debug: the last frame each pipe fetched, as raw rows
+            g_autofree char *path =
+                g_strdup_printf("%s/gp%p-%ux%u-stride%u-fmt%x.raw",
+                                getenv("ADP_DUMP"), (void *)genpipe,
+                                genpipe->state.src_width,
+                                genpipe->state.src_height,
+                                genpipe->state.stride,
+                                genpipe->state.pixel_format);
+
+            g_file_set_contents(path, genpipe->state.buf, len, NULL);
+        }
     } else {
         qemu_log_mask(LOG_GUEST_ERROR, "gp%d: failed to read from DMA.\n",
                       genpipe->index);
@@ -984,6 +1008,8 @@ static void adp_v4_register_types(void)
 
 type_init(adp_v4_register_types);
 
+static bool adp_v4_two_planes; // debug logging only
+
 // TODO: handle source/dest position, etc.
 static void adp_v4_gp_draw(ADPV4GenPipe *genpipe, AddressSpace *dma_as,
                            pixman_image_t *disp_image, QemuConsole *console,
@@ -1007,13 +1033,31 @@ static void adp_v4_gp_draw(ADPV4GenPipe *genpipe, AddressSpace *dma_as,
         qemu_mutex_unlock(&genpipe->lock);
     }
 
+    if (adp_v4_two_planes) {
+        static unsigned budget = 60;
+
+        if (budget != 0) {
+            budget--;
+            qemu_log_mask(LOG_UNIMP,
+                          "adp: draw gp%d op %s control 0x%x format 0x%x start "
+                          "0x%x end 0x%x stride %u src %ux%u dest %ux%u "
+                          "buf_len %u\n",
+                          genpipe->index, op == PIXMAN_OP_OVER ? "over" : "src",
+                          genpipe->state.config_control,
+                          genpipe->state.pixel_format,
+                          genpipe->state.data_start, genpipe->state.data_end,
+                          genpipe->state.stride, genpipe->state.src_width,
+                          genpipe->state.src_height, genpipe->state.dest_width,
+                          genpipe->state.dest_height, genpipe->state.buf_len);
+        }
+    }
     if (genpipe->state.buf_len != 0) {
         image = genpipe->state.image;
         if (image == NULL) {
             fmt = adp_v4_gp_fmt_to_pixman(genpipe);
             genpipe->state.image = image = pixman_image_create_bits(
                 fmt, genpipe->state.src_width, genpipe->state.src_height,
-                (uint32_t *)genpipe->state.buf, genpipe->state.stride);
+                (uint32_t *)genpipe->state.buf, genpipe->state.buf_stride);
         }
 
         pixman_image_composite(op, image, NULL, disp_image, 0, 0, 0, 0, 0, 0,
@@ -1052,6 +1096,9 @@ static void adp_v4_update_disp_bh(void *opaque)
                           adp->genpipe[0].state.pixel_format, now[3],
                           adp->genpipe[1].state.pixel_format);
         }
+        adp_v4_two_planes =
+            BLEND_LAYER_CONFIG_MODE(adp->blend_unit.layer_config[0]) != BLEND_MODE_NONE &&
+            BLEND_LAYER_CONFIG_MODE(adp->blend_unit.layer_config[1]) != BLEND_MODE_NONE;
         for (unsigned layer = 0; layer < 2; layer++) {
             uint32_t cfg = adp->blend_unit.layer_config[layer];
             unsigned pipe = BLEND_LAYER_CONFIG_PIPE(cfg);
