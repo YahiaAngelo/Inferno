@@ -71,6 +71,7 @@
 #include "qemu/guest-random.h"
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
+#include "qemu/rcu.h"
 #include "qemu/units.h"
 #include "system/reset.h"
 #include "system/runstate.h"
@@ -2414,6 +2415,17 @@ static void t8030_agxemu_log(void *opaque, const char *line)
     qemu_log_mask(LOG_UNIMP, "agxemu: %s\n", line);
 }
 
+// The renderer's worker threads read guest memory, which is RCU-protected.
+static void t8030_agxemu_thread_start(void *opaque)
+{
+    rcu_register_thread();
+}
+
+static void t8030_agxemu_thread_stop(void *opaque)
+{
+    rcu_unregister_thread();
+}
+
 static AgxEmu *t8030_agxemu(T8030GfxRegFile *rf)
 {
     AppleT8030MachineState *t8030 = rf->t8030;
@@ -2423,6 +2435,8 @@ static AgxEmu *t8030_agxemu(T8030GfxRegFile *rf)
             .read_phys = t8030_agxemu_read,
             .write_phys = t8030_agxemu_write,
             .log = t8030_agxemu_log,
+            .thread_start = t8030_agxemu_thread_start,
+            .thread_stop = t8030_agxemu_thread_stop,
         };
 
         t8030->gfx_emu = agxemu_new(&host, t8030->gfx_ttbat,
